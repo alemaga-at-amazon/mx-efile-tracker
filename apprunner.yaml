@@ -1,15 +1,18 @@
 version: 1.0
-runtime: python311
+runtime: python3
 build:
   commands:
     build:
+      - pip install --upgrade pip
       - pip install -r requirements.txt
 run:
-  command: streamlit run app.py --server.port=8080 --server.address=0.0.0.0 --server.headless=true
+  command: python -m streamlit run app.py --server.port 8080 --server.address 0.0.0.0 --server.headless true
   network:
     port: 8080
   env:
     - name: S3_BUCKET
-      value: gts-latam-efile-tracker
-    - name: AWS_REGION
-      value: us-east-1
+      value: "gts-latam-mx-efile-alemaga"
+    - name: S3_KEY
+      value: "mx-efile/MX_EFile_Tracker.xlsx"
+    - name: AWS_DEFAULT_REGION
+      value: "us-east-1"
