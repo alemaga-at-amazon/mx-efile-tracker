@@ -53,7 +53,7 @@ HTML = '''
     </style>
 </head>
 <body>
-    <div class="header"><h1>🇲🇽 MX E-File Compliance Tracker</h1><p>GTS LATAM | Article 59 MX Customs Law</p></div>
+    <div class="header"><h1>🇲🇽 MX Customs E-File Compliance Tracker</h1><p>GTS LATAM | Article 59 MX Customs Law</p></div>
     <div class="nav">
         {% for key, name in datasets.items() %}<a href="/{{ key }}" class="{{ 'active' if active == key }}">{{ name }}</a>{% endfor %}
     </div>
