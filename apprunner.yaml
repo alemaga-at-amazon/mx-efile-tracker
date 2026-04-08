@@ -3,8 +3,7 @@ runtime: python311
 build:
   commands:
     build:
-      - pip install --upgrade pip
-      - pip install -r requirements.txt
+      - pip install streamlit pandas boto3 openpyxl
 run:
   command: python -m streamlit run app.py --server.port 8080 --server.address 0.0.0.0 --server.headless true
   network:
