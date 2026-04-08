@@ -32,17 +32,23 @@ DATASETS = {
     'Operational Volume': 'operational-volume/data.csv'
 }
 
-@st.cache_data(ttl=300)  # Cache for 5 minutes
+@st.cache_data(ttl=300)
 def load_data_from_s3(key):
     """Load CSV from S3 bucket"""
     try:
-        s3 = boto3.client('s3', region_name=S3_REGION)
+        from botocore.config import Config
+        config = Config(connect_timeout=5, read_timeout=10)
+        s3 = boto3.client('s3', region_name=S3_REGION, config=config)
+        
+        st.sidebar.text(f"Loading: {key}")  # Debug
         response = s3.get_object(Bucket=S3_BUCKET, Key=key)
         csv_content = response['Body'].read().decode('utf-8')
         return pd.read_csv(StringIO(csv_content))
     except Exception as e:
-        st.error(f"Error loading data: {e}")
+        st.error(f"S3 Error: {type(e).__name__}: {e}")
+        st.error(f"Bucket: {S3_BUCKET}, Key: {key}, Region: {S3_REGION}")
         return None
+
 
 def style_rag_status(val):
     """Color code RAG status"""
