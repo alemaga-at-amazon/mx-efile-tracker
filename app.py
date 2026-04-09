@@ -34,6 +34,21 @@ TEAMS = [
     'Customs Broker'
 ]
 
+# Phase options
+PHASES = ['Short-Term', 'Mid-Term', 'Long-Term', 'Ongoing']
+
+# Workstream options
+WORKSTREAMS = [
+    'Document Discovery',
+    'System Integration', 
+    'Process Design',
+    'Training & Change',
+    'Compliance & Audit',
+    'Vendor Management',
+    'Technology',
+    'Operations'
+]
+
 def get_s3_client():
     config = Config(connect_timeout=5, read_timeout=10)
     return boto3.client('s3', region_name=S3_REGION, config=config)
@@ -48,8 +63,23 @@ def load_from_s3(folder):
         df = df.fillna('')
         for col in df.columns:
             df[col] = df[col].astype(str)
-            # Clean up 'nan' strings
             df[col] = df[col].replace('nan', '')
+        
+        # Normalize column names for action-plan
+        if folder == 'action-plan':
+            # Rename Target Date to ETA if needed
+            if 'Target Date' in df.columns and 'ETA' not in df.columns:
+                df = df.rename(columns={'Target Date': 'ETA'})
+            # Add Team column if missing
+            if 'Team' not in df.columns:
+                # Insert Team after Action Item (or at position 4)
+                cols = df.columns.tolist()
+                if 'Action Item' in cols:
+                    idx = cols.index('Action Item') + 1
+                else:
+                    idx = 4
+                df.insert(idx, 'Team', '')
+        
         return df
     except Exception as e:
         return str(e)
@@ -80,6 +110,8 @@ HTML = '''
         .nav a { padding: 10px 20px; background: #003366; color: white; text-decoration: none; border-radius: 5px; }
         .nav a:hover, .nav a.active { background: #0070c0; }
         .card { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin-bottom: 20px; }
+        .card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; }
+        .card-header h2 { margin: 0; }
         table { width: 100%; border-collapse: collapse; font-size: 12px; }
         th { background: #003366; color: white; padding: 8px 5px; text-align: left; position: sticky; top: 0; white-space: nowrap; }
         td { padding: 6px 5px; border-bottom: 1px solid #eee; vertical-align: top; }
@@ -100,6 +132,10 @@ HTML = '''
         .priority-p2 { background: #90EE90; padding: 2px 6px; border-radius: 3px; font-size: 11px; }
         .edit-btn { background: #0070c0; color: white; border: none; padding: 4px 8px; border-radius: 4px; cursor: pointer; font-size: 11px; }
         .edit-btn:hover { background: #005a9e; }
+        .add-btn { background: #28a745; color: white; border: none; padding: 8px 16px; border-radius: 5px; cursor: pointer; font-size: 14px; }
+        .add-btn:hover { background: #218838; }
+        .delete-btn { background: #dc3545; color: white; border: none; padding: 4px 8px; border-radius: 4px; cursor: pointer; font-size: 11px; margin-left: 5px; }
+        .delete-btn:hover { background: #c82333; }
         .owner-link { color: #0070c0; text-decoration: none; }
         .owner-link:hover { text-decoration: underline; }
         
@@ -127,7 +163,6 @@ HTML = '''
         .lookup-btn { position: absolute; right: 5px; top: 50%; transform: translateY(-50%); background: #0070c0; color: white; border: none; padding: 5px 10px; border-radius: 4px; cursor: pointer; font-size: 12px; }
         .lookup-btn:hover { background: #005a9e; }
         .alias-info { font-size: 12px; color: #666; margin-top: 5px; }
-        .date-input { cursor: pointer; }
     </style>
 </head>
 <body>
@@ -152,7 +187,12 @@ HTML = '''
     {% endif %}
     
     <div class="card">
-        <h2>{{ title }}</h2>
+        <div class="card-header">
+            <h2>{{ title }}</h2>
+            {% if editable %}
+            <button class="add-btn" onclick="openAddModal()">+ Add New Item</button>
+            {% endif %}
+        </div>
         {% if error %}
         <div class="error">{{ error }}</div>
         {% else %}
@@ -160,7 +200,7 @@ HTML = '''
         <table>
             <thead>
                 <tr>
-                    {% if editable %}<th>Edit</th>{% endif %}
+                    {% if editable %}<th>Actions</th>{% endif %}
                     {% for c in columns %}<th>{{ c }}</th>{% endfor %}
                 </tr>
             </thead>
@@ -168,7 +208,10 @@ HTML = '''
             {% for row in rows %}
                 <tr>
                     {% if editable %}
-                    <td><button class="edit-btn" onclick="openEditModal({{ loop.index0 }})">Edit</button></td>
+                    <td>
+                        <button class="edit-btn" onclick="openEditModal({{ loop.index0 }})">Edit</button>
+                        <button class="delete-btn" onclick="confirmDelete({{ loop.index0 }})">✕</button>
+                    </td>
                     {% endif %}
                     {% for c in columns %}
                     <td>
@@ -179,6 +222,8 @@ HTML = '''
                         {% elif c == 'Priority' %}
                             <span class="priority-{{ (row[c] or '')|lower }}">{{ row[c] or '' }}</span>
                         {% elif c == 'Owner' and row[c] %}
+                            <a href="https://phonetool.amazon.com/users/{{ row[c] }}" target="_blank" class="owner-link">{{ row[c] }}</a>
+                        {% elif c == 'POC' and row[c] %}
                             <a href="https://phonetool.amazon.com/users/{{ row[c] }}" target="_blank" class="owner-link">{{ row[c] }}</a>
                         {% else %}
                             {{ row[c] or '' }}
@@ -193,36 +238,44 @@ HTML = '''
         {% endif %}
     </div>
     
-    <!-- Edit Modal -->
+    <!-- Edit Modal for Action Plan -->
     <div id="editModal" class="modal">
         <div class="modal-content">
             <div class="modal-header">
-                <h2>Edit Action Item</h2>
-                <button class="close-btn" onclick="closeModal()">&times;</button>
+                <h2 id="modalTitle">Edit Action Item</h2>
+                <button class="close-btn" onclick="closeModal('editModal')">&times;</button>
             </div>
             <div id="successMsg" class="success-msg">Changes saved successfully!</div>
             <div id="errorMsg" class="error-msg"></div>
             <form id="editForm">
-                <input type="hidden" id="rowIndex" name="rowIndex">
+                <input type="hidden" id="rowIndex" name="rowIndex" value="-1">
                 <input type="hidden" id="dataset" name="dataset" value="{{ active }}">
+                <input type="hidden" id="isNew" name="isNew" value="false">
                 
                 <div class="form-row">
                     <div class="form-group">
                         <label>Action ID</label>
-                        <input type="text" id="actionId" readonly class="readonly">
+                        <input type="text" id="actionId" name="actionId">
                     </div>
                     <div class="form-group">
                         <label>Phase</label>
-                        <input type="text" id="phase" readonly class="readonly">
+                        <select id="phase" name="phase">
+                            {% for p in phases %}
+                            <option value="{{ p }}">{{ p }}</option>
+                            {% endfor %}
+                        </select>
                     </div>
                 </div>
                 
-                <div class="form-group">
-                    <label>Action Item</label>
-                    <textarea id="actionItem" readonly class="readonly"></textarea>
-                </div>
-                
                 <div class="form-row">
+                    <div class="form-group">
+                        <label>Workstream</label>
+                        <select id="workstream" name="workstream">
+                            {% for w in workstreams %}
+                            <option value="{{ w }}">{{ w }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
                     <div class="form-group">
                         <label>Team</label>
                         <select id="team" name="team">
@@ -232,20 +285,31 @@ HTML = '''
                             {% endfor %}
                         </select>
                     </div>
+                </div>
+                
+                <div class="form-group">
+                    <label>Action Item</label>
+                    <textarea id="actionItem" name="actionItem" required></textarea>
+                </div>
+                
+                <div class="form-row">
                     <div class="form-group">
                         <label>Owner (Amazon Alias)</label>
                         <div class="alias-wrapper">
                             <input type="text" id="owner" name="owner" class="alias-input" placeholder="e.g., johndoe">
-                            <button type="button" class="lookup-btn" onclick="lookupAlias()">Lookup</button>
+                            <button type="button" class="lookup-btn" onclick="lookupAlias('owner')">Lookup</button>
                         </div>
-                        <div id="aliasInfo" class="alias-info"></div>
+                    </div>
+                    <div class="form-group">
+                        <label>Dependencies</label>
+                        <input type="text" id="dependencies" name="dependencies" placeholder="e.g., AP-001, AP-002">
                     </div>
                 </div>
                 
                 <div class="form-row">
                     <div class="form-group">
                         <label>ETA</label>
-                        <input type="date" id="eta" name="eta" class="date-input">
+                        <input type="date" id="eta" name="eta">
                     </div>
                     <div class="form-group">
                         <label>Status</label>
@@ -298,126 +362,285 @@ HTML = '''
         </div>
     </div>
     
+    <!-- Stakeholder Modal -->
+    <div id="stakeholderModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 id="stakeholderModalTitle">Edit Stakeholder</h2>
+                <button class="close-btn" onclick="closeModal('stakeholderModal')">&times;</button>
+            </div>
+            <div id="stakeholderSuccessMsg" class="success-msg">Changes saved successfully!</div>
+            <div id="stakeholderErrorMsg" class="error-msg"></div>
+            <form id="stakeholderForm">
+                <input type="hidden" id="stakeholderRowIndex" name="rowIndex" value="-1">
+                <input type="hidden" id="stakeholderIsNew" name="isNew" value="false">
+                
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Stakeholder Name</label>
+                        <input type="text" id="stakeholderName" name="stakeholderName" required>
+                    </div>
+                    <div class="form-group">
+                        <label>Alias</label>
+                        <div class="alias-wrapper">
+                            <input type="text" id="stakeholderAlias" name="stakeholderAlias" class="alias-input" placeholder="Amazon alias">
+                            <button type="button" class="lookup-btn" onclick="lookupAlias('stakeholderAlias')">Lookup</button>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Role/Title</label>
+                        <input type="text" id="stakeholderRole" name="stakeholderRole">
+                    </div>
+                    <div class="form-group">
+                        <label>Team/Organization</label>
+                        <select id="stakeholderTeam" name="stakeholderTeam">
+                            <option value="">-- Select Team --</option>
+                            {% for t in teams %}
+                            <option value="{{ t }}">{{ t }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                </div>
+                
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Involvement Level</label>
+                        <select id="involvementLevel" name="involvementLevel">
+                            <option value="High">High</option>
+                            <option value="Medium">Medium</option>
+                            <option value="Low">Low</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Communication Preference</label>
+                        <select id="commPreference" name="commPreference">
+                            <option value="Email">Email</option>
+                            <option value="Chime">Chime</option>
+                            <option value="Meetings">Meetings</option>
+                            <option value="Slack">Slack</option>
+                        </select>
+                    </div>
+                </div>
+                
+                <div class="form-group">
+                    <label>Responsibilities</label>
+                    <textarea id="responsibilities" name="responsibilities"></textarea>
+                </div>
+                
+                <div class="form-group">
+                    <label>Notes</label>
+                    <textarea id="stakeholderNotes" name="stakeholderNotes"></textarea>
+                </div>
+                
+                <button type="submit" class="save-btn" id="stakeholderSaveBtn">Save Stakeholder</button>
+            </form>
+        </div>
+    </div>
+    
     <p style="color: #999; text-align: center; margin-top: 30px;">
         MX E-File Compliance Tracker | GTS LATAM | 
         <a href="/health">Health</a>
     </p>
     
     <script>
-        // Store row data for editing
         const rowData = {{ rows | tojson | safe }};
         const columns = {{ columns | tojson | safe }};
+        const currentDataset = "{{ active }}";
         
-        // Convert date from various formats to YYYY-MM-DD for input
+        // Date parsing functions
         function parseDate(dateStr) {
             if (!dateStr || dateStr === 'nan' || dateStr === '') return '';
-            
-            // Try MM/DD/YYYY format
             const mmddyyyy = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/;
             let match = dateStr.match(mmddyyyy);
             if (match) {
-                const mm = match[1].padStart(2, '0');
-                const dd = match[2].padStart(2, '0');
-                return `${match[3]}-${mm}-${dd}`;
+                return `${match[3]}-${match[1].padStart(2, '0')}-${match[2].padStart(2, '0')}`;
             }
-            
-            // Try Q1 2026 format - convert to end of quarter
             const quarter = /^Q(\d)\s*(\d{4})$/i;
             match = dateStr.match(quarter);
             if (match) {
                 const q = parseInt(match[1]);
-                const year = match[2];
-                const monthEnd = q * 3;
-                return `${year}-${String(monthEnd).padStart(2, '0')}-28`;
+                return `${match[2]}-${String(q * 3).padStart(2, '0')}-28`;
             }
-            
-            // Try to parse as date
             try {
                 const d = new Date(dateStr);
-                if (!isNaN(d.getTime())) {
-                    return d.toISOString().split('T')[0];
-                }
+                if (!isNaN(d.getTime())) return d.toISOString().split('T')[0];
             } catch (e) {}
-            
             return '';
         }
         
-        // Convert date from YYYY-MM-DD to MM/DD/YYYY for display/saving
         function formatDate(dateStr) {
             if (!dateStr) return '';
             const parts = dateStr.split('-');
-            if (parts.length === 3) {
-                return `${parts[1]}/${parts[2]}/${parts[0]}`;
-            }
+            if (parts.length === 3) return `${parts[1]}/${parts[2]}/${parts[0]}`;
             return dateStr;
+        }
+        
+        function lookupAlias(fieldId) {
+            const alias = document.getElementById(fieldId).value.trim();
+            if (!alias) { alert('Please enter an alias'); return; }
+            window.open(`https://phonetool.amazon.com/users/${alias}`, '_blank');
+        }
+        
+        function closeModal(modalId) {
+            document.getElementById(modalId).classList.remove('active');
+        }
+        
+        // Action Plan functions
+        function openAddModal() {
+            if (currentDataset === 'action-plan') {
+                document.getElementById('modalTitle').textContent = 'Add New Action Item';
+                document.getElementById('isNew').value = 'true';
+                document.getElementById('rowIndex').value = '-1';
+                
+                // Generate next Action ID
+                let maxNum = 0;
+                rowData.forEach(row => {
+                    const id = row['Action ID'] || '';
+                    const match = id.match(/AP-(\d+)/);
+                    if (match) maxNum = Math.max(maxNum, parseInt(match[1]));
+                });
+                document.getElementById('actionId').value = `AP-${String(maxNum + 1).padStart(3, '0')}`;
+                
+                // Clear form
+                document.getElementById('phase').value = 'Short-Term';
+                document.getElementById('workstream').value = 'Document Discovery';
+                document.getElementById('actionItem').value = '';
+                document.getElementById('team').value = '';
+                document.getElementById('owner').value = '';
+                document.getElementById('dependencies').value = '';
+                document.getElementById('eta').value = '';
+                document.getElementById('status').value = 'Planned';
+                document.getElementById('ragStatus').value = 'Green';
+                document.getElementById('priority').value = 'P1';
+                document.getElementById('reasonRA').value = '';
+                document.getElementById('pathToGreen').value = '';
+                document.getElementById('notes').value = '';
+                
+                document.getElementById('successMsg').style.display = 'none';
+                document.getElementById('errorMsg').style.display = 'none';
+                document.getElementById('editModal').classList.add('active');
+            } else if (currentDataset === 'stakeholder-matrix') {
+                document.getElementById('stakeholderModalTitle').textContent = 'Add New Stakeholder';
+                document.getElementById('stakeholderIsNew').value = 'true';
+                document.getElementById('stakeholderRowIndex').value = '-1';
+                
+                // Clear form
+                document.getElementById('stakeholderName').value = '';
+                document.getElementById('stakeholderAlias').value = '';
+                document.getElementById('stakeholderRole').value = '';
+                document.getElementById('stakeholderTeam').value = '';
+                document.getElementById('involvementLevel').value = 'Medium';
+                document.getElementById('commPreference').value = 'Email';
+                document.getElementById('responsibilities').value = '';
+                document.getElementById('stakeholderNotes').value = '';
+                
+                document.getElementById('stakeholderSuccessMsg').style.display = 'none';
+                document.getElementById('stakeholderErrorMsg').style.display = 'none';
+                document.getElementById('stakeholderModal').classList.add('active');
+            }
         }
         
         function openEditModal(index) {
             const row = rowData[index];
-            document.getElementById('rowIndex').value = index;
-            document.getElementById('actionId').value = row['Action ID'] || '';
-            document.getElementById('phase').value = row['Phase'] || '';
-            document.getElementById('actionItem').value = row['Action Item'] || '';
-            document.getElementById('team').value = row['Team'] || '';
-            document.getElementById('owner').value = row['Owner'] || '';
             
-            // Handle ETA/Target Date field
-            const etaValue = row['ETA'] || row['Target Date'] || '';
-            document.getElementById('eta').value = parseDate(etaValue);
-            
-            document.getElementById('status').value = row['Status'] || 'Planned';
-            document.getElementById('ragStatus').value = row['RAG Status'] || 'Green';
-            document.getElementById('priority').value = row['Priority'] || 'P1';
-            document.getElementById('reasonRA').value = row['Reason for R/A'] || '';
-            document.getElementById('pathToGreen').value = row['Path to Green'] || '';
-            document.getElementById('notes').value = row['Notes'] || '';
-            
-            document.getElementById('aliasInfo').innerHTML = '';
-            document.getElementById('successMsg').style.display = 'none';
-            document.getElementById('errorMsg').style.display = 'none';
-            document.getElementById('editModal').classList.add('active');
-        }
-        
-        function closeModal() {
-            document.getElementById('editModal').classList.remove('active');
-        }
-        
-        // Lookup Amazon alias in Phonetool
-        function lookupAlias() {
-            const alias = document.getElementById('owner').value.trim();
-            if (!alias) {
-                document.getElementById('aliasInfo').innerHTML = '<span style="color: #c00;">Please enter an alias</span>';
-                return;
+            if (currentDataset === 'action-plan') {
+                document.getElementById('modalTitle').textContent = 'Edit Action Item';
+                document.getElementById('isNew').value = 'false';
+                document.getElementById('rowIndex').value = index;
+                document.getElementById('actionId').value = row['Action ID'] || '';
+                document.getElementById('phase').value = row['Phase'] || 'Short-Term';
+                document.getElementById('workstream').value = row['Workstream'] || '';
+                document.getElementById('actionItem').value = row['Action Item'] || '';
+                document.getElementById('team').value = row['Team'] || '';
+                document.getElementById('owner').value = row['Owner'] || '';
+                document.getElementById('dependencies').value = row['Dependencies'] || '';
+                document.getElementById('eta').value = parseDate(row['ETA'] || row['Target Date'] || '');
+                document.getElementById('status').value = row['Status'] || 'Planned';
+                document.getElementById('ragStatus').value = row['RAG Status'] || 'Green';
+                document.getElementById('priority').value = row['Priority'] || 'P1';
+                document.getElementById('reasonRA').value = row['Reason for R/A'] || '';
+                document.getElementById('pathToGreen').value = row['Path to Green'] || '';
+                document.getElementById('notes').value = row['Notes'] || '';
+                
+                document.getElementById('successMsg').style.display = 'none';
+                document.getElementById('errorMsg').style.display = 'none';
+                document.getElementById('editModal').classList.add('active');
+            } else if (currentDataset === 'stakeholder-matrix') {
+                document.getElementById('stakeholderModalTitle').textContent = 'Edit Stakeholder';
+                document.getElementById('stakeholderIsNew').value = 'false';
+                document.getElementById('stakeholderRowIndex').value = index;
+                
+                // Map columns - adjust based on actual column names
+                document.getElementById('stakeholderName').value = row['Stakeholder'] || row['Name'] || '';
+                document.getElementById('stakeholderAlias').value = row['Alias'] || row['POC'] || '';
+                document.getElementById('stakeholderRole').value = row['Role'] || row['Title'] || '';
+                document.getElementById('stakeholderTeam').value = row['Team'] || row['Organization'] || '';
+                document.getElementById('involvementLevel').value = row['Involvement'] || row['Involvement Level'] || 'Medium';
+                document.getElementById('commPreference').value = row['Communication'] || row['Comm Preference'] || 'Email';
+                document.getElementById('responsibilities').value = row['Responsibilities'] || '';
+                document.getElementById('stakeholderNotes').value = row['Notes'] || '';
+                
+                document.getElementById('stakeholderSuccessMsg').style.display = 'none';
+                document.getElementById('stakeholderErrorMsg').style.display = 'none';
+                document.getElementById('stakeholderModal').classList.add('active');
             }
-            
-            // Open Phonetool in new tab for verification
-            window.open(`https://phonetool.amazon.com/users/${alias}`, '_blank');
-            document.getElementById('aliasInfo').innerHTML = `<span style="color: #0070c0;">Opened Phonetool for "${alias}" - verify and close the tab</span>`;
         }
         
-        // Close modal on outside click
-        document.getElementById('editModal').addEventListener('click', function(e) {
-            if (e.target === this) closeModal();
+        function confirmDelete(index) {
+            const row = rowData[index];
+            const itemName = row['Action ID'] || row['Stakeholder'] || row['Name'] || `Item ${index + 1}`;
+            if (confirm(`Are you sure you want to delete "${itemName}"?`)) {
+                deleteItem(index);
+            }
+        }
+        
+        async function deleteItem(index) {
+            try {
+                const response = await fetch('/api/delete', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ dataset: currentDataset, rowIndex: index })
+                });
+                const result = await response.json();
+                if (result.success) {
+                    location.reload();
+                } else {
+                    alert('Failed to delete: ' + (result.error || 'Unknown error'));
+                }
+            } catch (err) {
+                alert('Network error: ' + err.message);
+            }
+        }
+        
+        // Close modals on outside click
+        document.querySelectorAll('.modal').forEach(modal => {
+            modal.addEventListener('click', function(e) {
+                if (e.target === this) closeModal(this.id);
+            });
         });
         
-        // Handle form submission
+        // Action Plan form submission
         document.getElementById('editForm').addEventListener('submit', async function(e) {
             e.preventDefault();
-            
             const saveBtn = document.getElementById('saveBtn');
             saveBtn.disabled = true;
             saveBtn.textContent = 'Saving...';
             
-            // Format the date for saving
-            const etaInput = document.getElementById('eta').value;
-            const formattedEta = formatDate(etaInput);
-            
             const formData = {
-                dataset: document.getElementById('dataset').value,
+                dataset: currentDataset,
                 rowIndex: parseInt(document.getElementById('rowIndex').value),
+                isNew: document.getElementById('isNew').value === 'true',
+                actionId: document.getElementById('actionId').value,
+                phase: document.getElementById('phase').value,
+                workstream: document.getElementById('workstream').value,
+                actionItem: document.getElementById('actionItem').value,
                 team: document.getElementById('team').value,
                 owner: document.getElementById('owner').value.trim(),
-                eta: formattedEta,
+                dependencies: document.getElementById('dependencies').value,
+                eta: formatDate(document.getElementById('eta').value),
                 status: document.getElementById('status').value,
                 ragStatus: document.getElementById('ragStatus').value,
                 priority: document.getElementById('priority').value,
@@ -432,15 +655,10 @@ HTML = '''
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(formData)
                 });
-                
                 const result = await response.json();
-                
                 if (result.success) {
                     document.getElementById('successMsg').style.display = 'block';
-                    setTimeout(() => {
-                        closeModal();
-                        location.reload();
-                    }, 1000);
+                    setTimeout(() => { closeModal('editModal'); location.reload(); }, 1000);
                 } else {
                     document.getElementById('errorMsg').textContent = result.error || 'Failed to save';
                     document.getElementById('errorMsg').style.display = 'block';
@@ -449,9 +667,51 @@ HTML = '''
                 document.getElementById('errorMsg').textContent = 'Network error: ' + err.message;
                 document.getElementById('errorMsg').style.display = 'block';
             }
-            
             saveBtn.disabled = false;
             saveBtn.textContent = 'Save Changes';
+        });
+        
+        // Stakeholder form submission
+        document.getElementById('stakeholderForm').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            const saveBtn = document.getElementById('stakeholderSaveBtn');
+            saveBtn.disabled = true;
+            saveBtn.textContent = 'Saving...';
+            
+            const formData = {
+                dataset: 'stakeholder-matrix',
+                rowIndex: parseInt(document.getElementById('stakeholderRowIndex').value),
+                isNew: document.getElementById('stakeholderIsNew').value === 'true',
+                stakeholderName: document.getElementById('stakeholderName').value,
+                alias: document.getElementById('stakeholderAlias').value.trim(),
+                role: document.getElementById('stakeholderRole').value,
+                team: document.getElementById('stakeholderTeam').value,
+                involvementLevel: document.getElementById('involvementLevel').value,
+                commPreference: document.getElementById('commPreference').value,
+                responsibilities: document.getElementById('responsibilities').value,
+                notes: document.getElementById('stakeholderNotes').value
+            };
+            
+            try {
+                const response = await fetch('/api/update-stakeholder', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(formData)
+                });
+                const result = await response.json();
+                if (result.success) {
+                    document.getElementById('stakeholderSuccessMsg').style.display = 'block';
+                    setTimeout(() => { closeModal('stakeholderModal'); location.reload(); }, 1000);
+                } else {
+                    document.getElementById('stakeholderErrorMsg').textContent = result.error || 'Failed to save';
+                    document.getElementById('stakeholderErrorMsg').style.display = 'block';
+                }
+            } catch (err) {
+                document.getElementById('stakeholderErrorMsg').textContent = 'Network error: ' + err.message;
+                document.getElementById('stakeholderErrorMsg').style.display = 'block';
+            }
+            saveBtn.disabled = false;
+            saveBtn.textContent = 'Save Stakeholder';
         });
     </script>
 </body>
@@ -472,7 +732,8 @@ def view_dataset(dataset):
     if isinstance(result, str):
         return render_template_string(HTML, 
             datasets=DATASETS, active=dataset, title=DATASETS[dataset], 
-            error=result, columns=[], rows=[], stats=None, editable=False, teams=TEAMS)
+            error=result, columns=[], rows=[], stats=None, editable=False, 
+            teams=TEAMS, phases=PHASES, workstreams=WORKSTREAMS)
     
     df = result
     
@@ -486,62 +747,136 @@ def view_dataset(dataset):
             'planned': len(df[df['Status'] == 'Planned'])
         }
     
-    # Only action-plan is editable
-    editable = (dataset == 'action-plan')
+    # Editable datasets
+    editable = dataset in ['action-plan', 'stakeholder-matrix']
     
     return render_template_string(HTML,
         datasets=DATASETS, active=dataset, title=DATASETS[dataset],
         error=None, columns=df.columns.tolist(), rows=df.to_dict('records'),
-        stats=stats, editable=editable, teams=TEAMS)
+        stats=stats, editable=editable, teams=TEAMS, phases=PHASES, workstreams=WORKSTREAMS)
 
 @app.route('/api/update', methods=['POST'])
 def update_item():
     try:
         data = request.json
         dataset = data.get('dataset')
-        row_index = data.get('rowIndex')
+        row_index = data.get('rowIndex', -1)
+        is_new = data.get('isNew', False)
         
         if dataset != 'action-plan':
-            return jsonify({'success': False, 'error': 'Only Action Plan is editable'})
+            return jsonify({'success': False, 'error': 'Use /api/update-stakeholder for stakeholder matrix'})
         
-        # Load current data
         df = load_from_s3(dataset)
         if isinstance(df, str):
             return jsonify({'success': False, 'error': df})
         
-        # Update the row
-        if row_index < 0 or row_index >= len(df):
-            return jsonify({'success': False, 'error': 'Invalid row index'})
+        # Prepare row data
+        new_row = {
+            'Action ID': data.get('actionId', ''),
+            'Phase': data.get('phase', ''),
+            'Workstream': data.get('workstream', ''),
+            'Action Item': data.get('actionItem', ''),
+            'Team': data.get('team', ''),
+            'Owner': data.get('owner', ''),
+            'Dependencies': data.get('dependencies', ''),
+            'ETA': data.get('eta', ''),
+            'Status': data.get('status', ''),
+            'Priority': data.get('priority', ''),
+            'Notes': data.get('notes', ''),
+            'RAG Status': data.get('ragStatus', ''),
+            'Reason for R/A': data.get('reasonRA', ''),
+            'Path to Green': data.get('pathToGreen', '')
+        }
         
-        # Helper function to safely update a cell
-        def safe_update(col, value):
-            if col in df.columns:
-                df.at[row_index, col] = str(value) if value is not None else ''
+        if is_new:
+            # Add new row
+            df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+        else:
+            # Update existing row
+            if row_index < 0 or row_index >= len(df):
+                return jsonify({'success': False, 'error': 'Invalid row index'})
+            for col, value in new_row.items():
+                if col in df.columns:
+                    df.at[row_index, col] = str(value) if value else ''
         
-        # Update editable fields
-        safe_update('Team', data.get('team', ''))
-        safe_update('Owner', data.get('owner', ''))
-        safe_update('Status', data.get('status', ''))
-        safe_update('RAG Status', data.get('ragStatus', ''))
-        safe_update('Priority', data.get('priority', ''))
-        safe_update('Notes', data.get('notes', ''))
-        safe_update('Reason for R/A', data.get('reasonRA', ''))
-        safe_update('Path to Green', data.get('pathToGreen', ''))
-        
-        # Handle ETA field (might be called 'ETA' or 'Target Date')
-        eta_value = data.get('eta', '')
-        if 'ETA' in df.columns:
-            safe_update('ETA', eta_value)
-        elif 'Target Date' in df.columns:
-            safe_update('Target Date', eta_value)
-        
-        # Save back to S3
         result = save_to_s3(dataset, df)
         if result is True:
             return jsonify({'success': True})
+        return jsonify({'success': False, 'error': result})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+@app.route('/api/update-stakeholder', methods=['POST'])
+def update_stakeholder():
+    try:
+        data = request.json
+        row_index = data.get('rowIndex', -1)
+        is_new = data.get('isNew', False)
+        
+        df = load_from_s3('stakeholder-matrix')
+        if isinstance(df, str):
+            return jsonify({'success': False, 'error': df})
+        
+        # Map form fields to potential column names
+        col_mappings = {
+            'Stakeholder': data.get('stakeholderName', ''),
+            'Name': data.get('stakeholderName', ''),
+            'Alias': data.get('alias', ''),
+            'POC': data.get('alias', ''),
+            'Role': data.get('role', ''),
+            'Title': data.get('role', ''),
+            'Team': data.get('team', ''),
+            'Organization': data.get('team', ''),
+            'Involvement': data.get('involvementLevel', ''),
+            'Involvement Level': data.get('involvementLevel', ''),
+            'Communication': data.get('commPreference', ''),
+            'Comm Preference': data.get('commPreference', ''),
+            'Responsibilities': data.get('responsibilities', ''),
+            'Notes': data.get('notes', '')
+        }
+        
+        if is_new:
+            new_row = {}
+            for col in df.columns:
+                new_row[col] = col_mappings.get(col, '')
+            df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
         else:
-            return jsonify({'success': False, 'error': result})
-            
+            if row_index < 0 or row_index >= len(df):
+                return jsonify({'success': False, 'error': 'Invalid row index'})
+            for col in df.columns:
+                if col in col_mappings:
+                    df.at[row_index, col] = str(col_mappings[col]) if col_mappings[col] else ''
+        
+        result = save_to_s3('stakeholder-matrix', df)
+        if result is True:
+            return jsonify({'success': True})
+        return jsonify({'success': False, 'error': result})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+@app.route('/api/delete', methods=['POST'])
+def delete_item():
+    try:
+        data = request.json
+        dataset = data.get('dataset')
+        row_index = data.get('rowIndex')
+        
+        if dataset not in ['action-plan', 'stakeholder-matrix']:
+            return jsonify({'success': False, 'error': 'Dataset not editable'})
+        
+        df = load_from_s3(dataset)
+        if isinstance(df, str):
+            return jsonify({'success': False, 'error': df})
+        
+        if row_index < 0 or row_index >= len(df):
+            return jsonify({'success': False, 'error': 'Invalid row index'})
+        
+        df = df.drop(index=row_index).reset_index(drop=True)
+        
+        result = save_to_s3(dataset, df)
+        if result is True:
+            return jsonify({'success': True})
+        return jsonify({'success': False, 'error': result})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
 
