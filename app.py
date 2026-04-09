@@ -1,15 +1,26 @@
-from flask import Flask, render_template_string, jsonify, request
+from flask import Flask, render_template_string, jsonify, request, Response, session, redirect, url_for
 import pandas as pd
 import boto3
 from botocore.config import Config
-from io import StringIO
+from io import StringIO, BytesIO
 import os
+import json
+from datetime import datetime
+from functools import wraps
 
 app = Flask(__name__)
+app.secret_key = os.environ.get('SECRET_KEY', 'mx-efile-tracker-secret-2026')
 
 # Configuration
 S3_BUCKET = os.environ.get('S3_BUCKET', 'gts-latam-efile-tracker')
 S3_REGION = os.environ.get('AWS_DEFAULT_REGION', 'us-east-1')
+SES_SENDER = os.environ.get('SES_SENDER', 'noreply@amazon.com')
+
+# Authorized editors (Amazon aliases)
+AUTHORIZED_EDITORS = os.environ.get('AUTHORIZED_EDITORS', 'alemaga,admin').split(',')
+
+# Notification recipients
+NOTIFICATION_EMAILS = os.environ.get('NOTIFICATION_EMAILS', '').split(',')
 
 DATASETS = {
     'action-plan': 'Action Plan',
@@ -20,38 +31,16 @@ DATASETS = {
     'operational-volume': 'Operational Volume'
 }
 
-# Team options
-TEAMS = [
-    'GTS',
-    'AP/FinOps',
-    'Supply Chain',
-    'InTech',
-    'Legal',
-    'HR/Payroll',
-    'Accounting',
-    'Retail',
-    'GREF',
-    'Customs Broker'
-]
-
-# Phase options
+TEAMS = ['GTS', 'AP/FinOps', 'Supply Chain', 'InTech', 'Legal', 'HR/Payroll', 'Accounting', 'Retail', 'GREF', 'Customs Broker']
 PHASES = ['Short-Term', 'Mid-Term', 'Long-Term', 'Ongoing']
-
-# Workstream options
-WORKSTREAMS = [
-    'Document Discovery',
-    'System Integration', 
-    'Process Design',
-    'Training & Change',
-    'Compliance & Audit',
-    'Vendor Management',
-    'Technology',
-    'Operations'
-]
+WORKSTREAMS = ['Document Discovery', 'System Integration', 'Process Design', 'Training & Change', 'Compliance & Audit', 'Vendor Management', 'Technology', 'Operations']
 
 def get_s3_client():
     config = Config(connect_timeout=5, read_timeout=10)
     return boto3.client('s3', region_name=S3_REGION, config=config)
+
+def get_ses_client():
+    return boto3.client('ses', region_name=S3_REGION)
 
 def load_from_s3(folder):
     try:
@@ -59,27 +48,17 @@ def load_from_s3(folder):
         key = f"{folder}/data.csv"
         response = s3.get_object(Bucket=S3_BUCKET, Key=key)
         df = pd.read_csv(StringIO(response['Body'].read().decode('utf-8')))
-        # Convert all columns to string to avoid dtype issues
         df = df.fillna('')
         for col in df.columns:
-            df[col] = df[col].astype(str)
-            df[col] = df[col].replace('nan', '')
+            df[col] = df[col].astype(str).replace('nan', '')
         
-        # Normalize column names for action-plan
         if folder == 'action-plan':
-            # Rename Target Date to ETA if needed
             if 'Target Date' in df.columns and 'ETA' not in df.columns:
                 df = df.rename(columns={'Target Date': 'ETA'})
-            # Add Team column if missing
             if 'Team' not in df.columns:
-                # Insert Team after Action Item (or at position 4)
                 cols = df.columns.tolist()
-                if 'Action Item' in cols:
-                    idx = cols.index('Action Item') + 1
-                else:
-                    idx = 4
+                idx = cols.index('Action Item') + 1 if 'Action Item' in cols else 4
                 df.insert(idx, 'Team', '')
-        
         return df
     except Exception as e:
         return str(e)
@@ -95,6 +74,50 @@ def save_to_s3(folder, df):
     except Exception as e:
         return str(e)
 
+def send_notification(action_id, action_item, old_status, new_status, changed_by):
+    """Send email notification when status changes"""
+    if not NOTIFICATION_EMAILS or not NOTIFICATION_EMAILS[0]:
+        return
+    
+    try:
+        ses = get_ses_client()
+        subject = f"[MX E-File Tracker] Status Change: {action_id}"
+        body = f"""
+Action Item Status Changed
+
+Action ID: {action_id}
+Action Item: {action_item}
+Previous Status: {old_status}
+New Status: {new_status}
+Changed By: {changed_by}
+Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+View tracker: https://tckiezxcqn.us-east-1.awsapprunner.com/action-plan
+"""
+        
+        ses.send_email(
+            Source=SES_SENDER,
+            Destination={'ToAddresses': [e.strip() for e in NOTIFICATION_EMAILS if e.strip()]},
+            Message={
+                'Subject': {'Data': subject},
+                'Body': {'Text': {'Data': body}}
+            }
+        )
+    except Exception as e:
+        print(f"Failed to send notification: {e}")
+
+def login_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if 'user' not in session:
+            return jsonify({'success': False, 'error': 'Authentication required', 'needsLogin': True}), 401
+        return f(*args, **kwargs)
+    return decorated_function
+
+def is_authorized_editor():
+    user = session.get('user', '')
+    return user.lower() in [e.lower().strip() for e in AUTHORIZED_EDITORS]
+
 HTML = '''
 <!DOCTYPE html>
 <html>
@@ -103,15 +126,20 @@ HTML = '''
     <style>
         * { box-sizing: border-box; }
         body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; margin: 0; padding: 20px; background: #f5f5f5; }
-        .header { background: #003366; color: white; padding: 20px; margin: -20px -20px 20px; }
-        .header h1 { margin: 0; }
-        .header p { margin: 5px 0 0; opacity: 0.8; }
+        .header { background: #003366; color: white; padding: 20px; margin: -20px -20px 20px; display: flex; justify-content: space-between; align-items: center; }
+        .header-left h1 { margin: 0; }
+        .header-left p { margin: 5px 0 0; opacity: 0.8; }
+        .header-right { display: flex; align-items: center; gap: 15px; }
+        .user-info { color: white; font-size: 14px; }
+        .login-btn, .logout-btn { background: #0070c0; color: white; border: none; padding: 8px 16px; border-radius: 5px; cursor: pointer; text-decoration: none; font-size: 14px; }
+        .login-btn:hover, .logout-btn:hover { background: #005a9e; }
         .nav { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 20px; }
         .nav a { padding: 10px 20px; background: #003366; color: white; text-decoration: none; border-radius: 5px; }
         .nav a:hover, .nav a.active { background: #0070c0; }
         .card { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin-bottom: 20px; }
-        .card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; }
+        .card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; flex-wrap: wrap; gap: 10px; }
         .card-header h2 { margin: 0; }
+        .btn-group { display: flex; gap: 10px; flex-wrap: wrap; }
         table { width: 100%; border-collapse: collapse; font-size: 12px; }
         th { background: #003366; color: white; padding: 8px 5px; text-align: left; position: sticky; top: 0; white-space: nowrap; }
         td { padding: 6px 5px; border-bottom: 1px solid #eee; vertical-align: top; }
@@ -134,12 +162,13 @@ HTML = '''
         .edit-btn:hover { background: #005a9e; }
         .add-btn { background: #28a745; color: white; border: none; padding: 8px 16px; border-radius: 5px; cursor: pointer; font-size: 14px; }
         .add-btn:hover { background: #218838; }
+        .export-btn { background: #6c757d; color: white; border: none; padding: 8px 16px; border-radius: 5px; cursor: pointer; font-size: 14px; text-decoration: none; }
+        .export-btn:hover { background: #5a6268; }
         .delete-btn { background: #dc3545; color: white; border: none; padding: 4px 8px; border-radius: 4px; cursor: pointer; font-size: 11px; margin-left: 5px; }
         .delete-btn:hover { background: #c82333; }
         .owner-link { color: #0070c0; text-decoration: none; }
         .owner-link:hover { text-decoration: underline; }
         
-        /* Modal styles */
         .modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 1000; }
         .modal.active { display: flex; align-items: center; justify-content: center; }
         .modal-content { background: white; padding: 30px; border-radius: 12px; width: 90%; max-width: 700px; max-height: 90vh; overflow-y: auto; }
@@ -162,13 +191,23 @@ HTML = '''
         .alias-input { padding-right: 80px !important; }
         .lookup-btn { position: absolute; right: 5px; top: 50%; transform: translateY(-50%); background: #0070c0; color: white; border: none; padding: 5px 10px; border-radius: 4px; cursor: pointer; font-size: 12px; }
         .lookup-btn:hover { background: #005a9e; }
-        .alias-info { font-size: 12px; color: #666; margin-top: 5px; }
+        .read-only-notice { background: #fff3cd; color: #856404; padding: 10px 15px; border-radius: 6px; margin-bottom: 15px; font-size: 14px; }
     </style>
 </head>
 <body>
     <div class="header">
-        <h1>🇲🇽 MX E-File Compliance Tracker</h1>
-        <p>GTS LATAM | Article 59 MX Customs Law</p>
+        <div class="header-left">
+            <h1>🇲🇽 MX E-File Compliance Tracker</h1>
+            <p>GTS LATAM | Article 59 MX Customs Law</p>
+        </div>
+        <div class="header-right">
+            {% if user %}
+            <span class="user-info">👤 {{ user }}{% if is_editor %} (Editor){% endif %}</span>
+            <a href="/logout" class="logout-btn">Logout</a>
+            {% else %}
+            <button class="login-btn" onclick="openLoginModal()">Login to Edit</button>
+            {% endif %}
+        </div>
     </div>
     
     <div class="nav">
@@ -189,10 +228,21 @@ HTML = '''
     <div class="card">
         <div class="card-header">
             <h2>{{ title }}</h2>
-            {% if editable %}
-            <button class="add-btn" onclick="openAddModal()">+ Add New Item</button>
-            {% endif %}
+            <div class="btn-group">
+                <a href="/export/{{ active }}/excel" class="export-btn">📥 Export Excel</a>
+                <a href="/export/{{ active }}/csv" class="export-btn">📥 Export CSV</a>
+                {% if editable and is_editor %}
+                <button class="add-btn" onclick="openAddModal()">+ Add New Item</button>
+                {% endif %}
+            </div>
         </div>
+        
+        {% if editable and not is_editor %}
+        <div class="read-only-notice">
+            🔒 <strong>View Only</strong> - <a href="#" onclick="openLoginModal(); return false;">Login</a> with an authorized alias to edit items.
+        </div>
+        {% endif %}
+        
         {% if error %}
         <div class="error">{{ error }}</div>
         {% else %}
@@ -200,14 +250,14 @@ HTML = '''
         <table>
             <thead>
                 <tr>
-                    {% if editable %}<th>Actions</th>{% endif %}
+                    {% if editable and is_editor %}<th>Actions</th>{% endif %}
                     {% for c in columns %}<th>{{ c }}</th>{% endfor %}
                 </tr>
             </thead>
             <tbody>
             {% for row in rows %}
                 <tr>
-                    {% if editable %}
+                    {% if editable and is_editor %}
                     <td>
                         <button class="edit-btn" onclick="openEditModal({{ loop.index0 }})">Edit</button>
                         <button class="delete-btn" onclick="confirmDelete({{ loop.index0 }})">✕</button>
@@ -238,6 +288,27 @@ HTML = '''
         {% endif %}
     </div>
     
+    <!-- Login Modal -->
+    <div id="loginModal" class="modal">
+        <div class="modal-content" style="max-width: 400px;">
+            <div class="modal-header">
+                <h2>Login</h2>
+                <button class="close-btn" onclick="closeModal('loginModal')">&times;</button>
+            </div>
+            <div id="loginErrorMsg" class="error-msg"></div>
+            <form id="loginForm">
+                <div class="form-group">
+                    <label>Amazon Alias</label>
+                    <input type="text" id="loginAlias" name="alias" placeholder="Enter your Amazon alias" required>
+                </div>
+                <p style="font-size: 12px; color: #666; margin-top: -10px;">
+                    Authorized editors: {{ authorized_editors }}
+                </p>
+                <button type="submit" class="save-btn">Login</button>
+            </form>
+        </div>
+    </div>
+    
     <!-- Edit Modal for Action Plan -->
     <div id="editModal" class="modal">
         <div class="modal-content">
@@ -260,9 +331,7 @@ HTML = '''
                     <div class="form-group">
                         <label>Phase</label>
                         <select id="phase" name="phase">
-                            {% for p in phases %}
-                            <option value="{{ p }}">{{ p }}</option>
-                            {% endfor %}
+                            {% for p in phases %}<option value="{{ p }}">{{ p }}</option>{% endfor %}
                         </select>
                     </div>
                 </div>
@@ -271,18 +340,14 @@ HTML = '''
                     <div class="form-group">
                         <label>Workstream</label>
                         <select id="workstream" name="workstream">
-                            {% for w in workstreams %}
-                            <option value="{{ w }}">{{ w }}</option>
-                            {% endfor %}
+                            {% for w in workstreams %}<option value="{{ w }}">{{ w }}</option>{% endfor %}
                         </select>
                     </div>
                     <div class="form-group">
                         <label>Team</label>
                         <select id="team" name="team">
                             <option value="">-- Select Team --</option>
-                            {% for t in teams %}
-                            <option value="{{ t }}">{{ t }}</option>
-                            {% endfor %}
+                            {% for t in teams %}<option value="{{ t }}">{{ t }}</option>{% endfor %}
                         </select>
                     </div>
                 </div>
@@ -398,9 +463,7 @@ HTML = '''
                         <label>Team/Organization</label>
                         <select id="stakeholderTeam" name="stakeholderTeam">
                             <option value="">-- Select Team --</option>
-                            {% for t in teams %}
-                            <option value="{{ t }}">{{ t }}</option>
-                            {% endfor %}
+                            {% for t in teams %}<option value="{{ t }}">{{ t }}</option>{% endfor %}
                         </select>
                     </div>
                 </div>
@@ -441,41 +504,31 @@ HTML = '''
     </div>
     
     <p style="color: #999; text-align: center; margin-top: 30px;">
-        MX E-File Compliance Tracker | GTS LATAM | 
-        <a href="/health">Health</a>
+        MX E-File Compliance Tracker | GTS LATAM | <a href="/health">Health</a>
     </p>
     
     <script>
         const rowData = {{ rows | tojson | safe }};
         const columns = {{ columns | tojson | safe }};
         const currentDataset = "{{ active }}";
+        const isEditor = {{ 'true' if is_editor else 'false' }};
         
-        // Date parsing functions
         function parseDate(dateStr) {
             if (!dateStr || dateStr === 'nan' || dateStr === '') return '';
             const mmddyyyy = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/;
             let match = dateStr.match(mmddyyyy);
-            if (match) {
-                return `${match[3]}-${match[1].padStart(2, '0')}-${match[2].padStart(2, '0')}`;
-            }
+            if (match) return `${match[3]}-${match[1].padStart(2, '0')}-${match[2].padStart(2, '0')}`;
             const quarter = /^Q(\d)\s*(\d{4})$/i;
             match = dateStr.match(quarter);
-            if (match) {
-                const q = parseInt(match[1]);
-                return `${match[2]}-${String(q * 3).padStart(2, '0')}-28`;
-            }
-            try {
-                const d = new Date(dateStr);
-                if (!isNaN(d.getTime())) return d.toISOString().split('T')[0];
-            } catch (e) {}
+            if (match) return `${match[2]}-${String(parseInt(match[1]) * 3).padStart(2, '0')}-28`;
+            try { const d = new Date(dateStr); if (!isNaN(d.getTime())) return d.toISOString().split('T')[0]; } catch (e) {}
             return '';
         }
         
         function formatDate(dateStr) {
             if (!dateStr) return '';
             const parts = dateStr.split('-');
-            if (parts.length === 3) return `${parts[1]}/${parts[2]}/${parts[0]}`;
-            return dateStr;
+            return parts.length === 3 ? `${parts[1]}/${parts[2]}/${parts[0]}` : dateStr;
         }
         
         function lookupAlias(fieldId) {
@@ -484,41 +537,31 @@ HTML = '''
             window.open(`https://phonetool.amazon.com/users/${alias}`, '_blank');
         }
         
-        function closeModal(modalId) {
-            document.getElementById(modalId).classList.remove('active');
+        function closeModal(modalId) { document.getElementById(modalId).classList.remove('active'); }
+        
+        function openLoginModal() {
+            document.getElementById('loginErrorMsg').style.display = 'none';
+            document.getElementById('loginAlias').value = '';
+            document.getElementById('loginModal').classList.add('active');
         }
         
-        // Action Plan functions
         function openAddModal() {
+            if (!isEditor) { openLoginModal(); return; }
+            
             if (currentDataset === 'action-plan') {
                 document.getElementById('modalTitle').textContent = 'Add New Action Item';
                 document.getElementById('isNew').value = 'true';
                 document.getElementById('rowIndex').value = '-1';
-                
-                // Generate next Action ID
                 let maxNum = 0;
-                rowData.forEach(row => {
-                    const id = row['Action ID'] || '';
-                    const match = id.match(/AP-(\d+)/);
-                    if (match) maxNum = Math.max(maxNum, parseInt(match[1]));
-                });
+                rowData.forEach(row => { const match = (row['Action ID'] || '').match(/AP-(\d+)/); if (match) maxNum = Math.max(maxNum, parseInt(match[1])); });
                 document.getElementById('actionId').value = `AP-${String(maxNum + 1).padStart(3, '0')}`;
-                
-                // Clear form
+                ['actionItem', 'owner', 'dependencies', 'eta', 'reasonRA', 'pathToGreen', 'notes'].forEach(f => document.getElementById(f).value = '');
                 document.getElementById('phase').value = 'Short-Term';
                 document.getElementById('workstream').value = 'Document Discovery';
-                document.getElementById('actionItem').value = '';
                 document.getElementById('team').value = '';
-                document.getElementById('owner').value = '';
-                document.getElementById('dependencies').value = '';
-                document.getElementById('eta').value = '';
                 document.getElementById('status').value = 'Planned';
                 document.getElementById('ragStatus').value = 'Green';
                 document.getElementById('priority').value = 'P1';
-                document.getElementById('reasonRA').value = '';
-                document.getElementById('pathToGreen').value = '';
-                document.getElementById('notes').value = '';
-                
                 document.getElementById('successMsg').style.display = 'none';
                 document.getElementById('errorMsg').style.display = 'none';
                 document.getElementById('editModal').classList.add('active');
@@ -526,17 +569,10 @@ HTML = '''
                 document.getElementById('stakeholderModalTitle').textContent = 'Add New Stakeholder';
                 document.getElementById('stakeholderIsNew').value = 'true';
                 document.getElementById('stakeholderRowIndex').value = '-1';
-                
-                // Clear form
-                document.getElementById('stakeholderName').value = '';
-                document.getElementById('stakeholderAlias').value = '';
-                document.getElementById('stakeholderRole').value = '';
+                ['stakeholderName', 'stakeholderAlias', 'stakeholderRole', 'responsibilities', 'stakeholderNotes'].forEach(f => document.getElementById(f).value = '');
                 document.getElementById('stakeholderTeam').value = '';
                 document.getElementById('involvementLevel').value = 'Medium';
                 document.getElementById('commPreference').value = 'Email';
-                document.getElementById('responsibilities').value = '';
-                document.getElementById('stakeholderNotes').value = '';
-                
                 document.getElementById('stakeholderSuccessMsg').style.display = 'none';
                 document.getElementById('stakeholderErrorMsg').style.display = 'none';
                 document.getElementById('stakeholderModal').classList.add('active');
@@ -544,6 +580,7 @@ HTML = '''
         }
         
         function openEditModal(index) {
+            if (!isEditor) { openLoginModal(); return; }
             const row = rowData[index];
             
             if (currentDataset === 'action-plan') {
@@ -564,7 +601,6 @@ HTML = '''
                 document.getElementById('reasonRA').value = row['Reason for R/A'] || '';
                 document.getElementById('pathToGreen').value = row['Path to Green'] || '';
                 document.getElementById('notes').value = row['Notes'] || '';
-                
                 document.getElementById('successMsg').style.display = 'none';
                 document.getElementById('errorMsg').style.display = 'none';
                 document.getElementById('editModal').classList.add('active');
@@ -572,8 +608,6 @@ HTML = '''
                 document.getElementById('stakeholderModalTitle').textContent = 'Edit Stakeholder';
                 document.getElementById('stakeholderIsNew').value = 'false';
                 document.getElementById('stakeholderRowIndex').value = index;
-                
-                // Map columns - adjust based on actual column names
                 document.getElementById('stakeholderName').value = row['Stakeholder'] || row['Name'] || '';
                 document.getElementById('stakeholderAlias').value = row['Alias'] || row['POC'] || '';
                 document.getElementById('stakeholderRole').value = row['Role'] || row['Title'] || '';
@@ -582,7 +616,6 @@ HTML = '''
                 document.getElementById('commPreference').value = row['Communication'] || row['Comm Preference'] || 'Email';
                 document.getElementById('responsibilities').value = row['Responsibilities'] || '';
                 document.getElementById('stakeholderNotes').value = row['Notes'] || '';
-                
                 document.getElementById('stakeholderSuccessMsg').style.display = 'none';
                 document.getElementById('stakeholderErrorMsg').style.display = 'none';
                 document.getElementById('stakeholderModal').classList.add('active');
@@ -590,11 +623,10 @@ HTML = '''
         }
         
         function confirmDelete(index) {
+            if (!isEditor) { openLoginModal(); return; }
             const row = rowData[index];
             const itemName = row['Action ID'] || row['Stakeholder'] || row['Name'] || `Item ${index + 1}`;
-            if (confirm(`Are you sure you want to delete "${itemName}"?`)) {
-                deleteItem(index);
-            }
+            if (confirm(`Are you sure you want to delete "${itemName}"?`)) deleteItem(index);
         }
         
         async function deleteItem(index) {
@@ -605,24 +637,39 @@ HTML = '''
                     body: JSON.stringify({ dataset: currentDataset, rowIndex: index })
                 });
                 const result = await response.json();
-                if (result.success) {
-                    location.reload();
-                } else {
-                    alert('Failed to delete: ' + (result.error || 'Unknown error'));
-                }
-            } catch (err) {
-                alert('Network error: ' + err.message);
-            }
+                if (result.needsLogin) { openLoginModal(); return; }
+                if (result.success) location.reload();
+                else alert('Failed to delete: ' + (result.error || 'Unknown error'));
+            } catch (err) { alert('Network error: ' + err.message); }
         }
         
-        // Close modals on outside click
         document.querySelectorAll('.modal').forEach(modal => {
-            modal.addEventListener('click', function(e) {
-                if (e.target === this) closeModal(this.id);
-            });
+            modal.addEventListener('click', function(e) { if (e.target === this) closeModal(this.id); });
         });
         
-        // Action Plan form submission
+        // Login form
+        document.getElementById('loginForm').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            const alias = document.getElementById('loginAlias').value.trim();
+            try {
+                const response = await fetch('/api/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ alias })
+                });
+                const result = await response.json();
+                if (result.success) location.reload();
+                else {
+                    document.getElementById('loginErrorMsg').textContent = result.error || 'Login failed';
+                    document.getElementById('loginErrorMsg').style.display = 'block';
+                }
+            } catch (err) {
+                document.getElementById('loginErrorMsg').textContent = 'Network error';
+                document.getElementById('loginErrorMsg').style.display = 'block';
+            }
+        });
+        
+        // Action Plan form
         document.getElementById('editForm').addEventListener('submit', async function(e) {
             e.preventDefault();
             const saveBtn = document.getElementById('saveBtn');
@@ -656,6 +703,7 @@ HTML = '''
                     body: JSON.stringify(formData)
                 });
                 const result = await response.json();
+                if (result.needsLogin) { openLoginModal(); saveBtn.disabled = false; saveBtn.textContent = 'Save Changes'; return; }
                 if (result.success) {
                     document.getElementById('successMsg').style.display = 'block';
                     setTimeout(() => { closeModal('editModal'); location.reload(); }, 1000);
@@ -671,7 +719,7 @@ HTML = '''
             saveBtn.textContent = 'Save Changes';
         });
         
-        // Stakeholder form submission
+        // Stakeholder form
         document.getElementById('stakeholderForm').addEventListener('submit', async function(e) {
             e.preventDefault();
             const saveBtn = document.getElementById('stakeholderSaveBtn');
@@ -699,6 +747,7 @@ HTML = '''
                     body: JSON.stringify(formData)
                 });
                 const result = await response.json();
+                if (result.needsLogin) { openLoginModal(); saveBtn.disabled = false; saveBtn.textContent = 'Save Stakeholder'; return; }
                 if (result.success) {
                     document.getElementById('stakeholderSuccessMsg').style.display = 'block';
                     setTimeout(() => { closeModal('stakeholderModal'); location.reload(); }, 1000);
@@ -728,16 +777,17 @@ def view_dataset(dataset):
         return "Not found", 404
     
     result = load_from_s3(dataset)
+    user = session.get('user')
+    is_editor = is_authorized_editor()
     
     if isinstance(result, str):
         return render_template_string(HTML, 
             datasets=DATASETS, active=dataset, title=DATASETS[dataset], 
             error=result, columns=[], rows=[], stats=None, editable=False, 
-            teams=TEAMS, phases=PHASES, workstreams=WORKSTREAMS)
+            teams=TEAMS, phases=PHASES, workstreams=WORKSTREAMS,
+            user=user, is_editor=is_editor, authorized_editors=', '.join(AUTHORIZED_EDITORS))
     
     df = result
-    
-    # Calculate stats for action plan
     stats = None
     if dataset == 'action-plan' and 'Status' in df.columns:
         stats = {
@@ -747,15 +797,72 @@ def view_dataset(dataset):
             'planned': len(df[df['Status'] == 'Planned'])
         }
     
-    # Editable datasets
     editable = dataset in ['action-plan', 'stakeholder-matrix']
     
     return render_template_string(HTML,
         datasets=DATASETS, active=dataset, title=DATASETS[dataset],
         error=None, columns=df.columns.tolist(), rows=df.to_dict('records'),
-        stats=stats, editable=editable, teams=TEAMS, phases=PHASES, workstreams=WORKSTREAMS)
+        stats=stats, editable=editable, teams=TEAMS, phases=PHASES, workstreams=WORKSTREAMS,
+        user=user, is_editor=is_editor, authorized_editors=', '.join(AUTHORIZED_EDITORS))
+
+@app.route('/api/login', methods=['POST'])
+def login():
+    data = request.json
+    alias = data.get('alias', '').strip().lower()
+    
+    if alias in [e.lower().strip() for e in AUTHORIZED_EDITORS]:
+        session['user'] = alias
+        return jsonify({'success': True})
+    else:
+        return jsonify({'success': False, 'error': f'"{alias}" is not an authorized editor'})
+
+@app.route('/logout')
+def logout():
+    session.pop('user', None)
+    return redirect('/')
+
+@app.route('/export/<dataset>/excel')
+def export_excel(dataset):
+    if dataset not in DATASETS:
+        return "Not found", 404
+    
+    df = load_from_s3(dataset)
+    if isinstance(df, str):
+        return f"Error: {df}", 500
+    
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False, sheet_name=DATASETS[dataset][:31])
+    output.seek(0)
+    
+    filename = f"MX_EFile_{dataset}_{datetime.now().strftime('%Y%m%d')}.xlsx"
+    return Response(
+        output.getvalue(),
+        mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        headers={'Content-Disposition': f'attachment; filename={filename}'}
+    )
+
+@app.route('/export/<dataset>/csv')
+def export_csv(dataset):
+    if dataset not in DATASETS:
+        return "Not found", 404
+    
+    df = load_from_s3(dataset)
+    if isinstance(df, str):
+        return f"Error: {df}", 500
+    
+    output = StringIO()
+    df.to_csv(output, index=False)
+    
+    filename = f"MX_EFile_{dataset}_{datetime.now().strftime('%Y%m%d')}.csv"
+    return Response(
+        output.getvalue(),
+        mimetype='text/csv',
+        headers={'Content-Disposition': f'attachment; filename={filename}'}
+    )
 
 @app.route('/api/update', methods=['POST'])
+@login_required
 def update_item():
     try:
         data = request.json
@@ -770,7 +877,11 @@ def update_item():
         if isinstance(df, str):
             return jsonify({'success': False, 'error': df})
         
-        # Prepare row data
+        # Get old status for notification
+        old_status = ''
+        if not is_new and row_index >= 0 and row_index < len(df):
+            old_status = df.at[row_index, 'Status'] if 'Status' in df.columns else ''
+        
         new_row = {
             'Action ID': data.get('actionId', ''),
             'Phase': data.get('phase', ''),
@@ -789,10 +900,8 @@ def update_item():
         }
         
         if is_new:
-            # Add new row
             df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
         else:
-            # Update existing row
             if row_index < 0 or row_index >= len(df):
                 return jsonify({'success': False, 'error': 'Invalid row index'})
             for col, value in new_row.items():
@@ -801,12 +910,23 @@ def update_item():
         
         result = save_to_s3(dataset, df)
         if result is True:
+            # Send notification if status changed
+            new_status = data.get('status', '')
+            if old_status and new_status and old_status != new_status:
+                send_notification(
+                    data.get('actionId', ''),
+                    data.get('actionItem', ''),
+                    old_status,
+                    new_status,
+                    session.get('user', 'unknown')
+                )
             return jsonify({'success': True})
         return jsonify({'success': False, 'error': result})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
 
 @app.route('/api/update-stakeholder', methods=['POST'])
+@login_required
 def update_stakeholder():
     try:
         data = request.json
@@ -817,7 +937,6 @@ def update_stakeholder():
         if isinstance(df, str):
             return jsonify({'success': False, 'error': df})
         
-        # Map form fields to potential column names
         col_mappings = {
             'Stakeholder': data.get('stakeholderName', ''),
             'Name': data.get('stakeholderName', ''),
@@ -836,9 +955,7 @@ def update_stakeholder():
         }
         
         if is_new:
-            new_row = {}
-            for col in df.columns:
-                new_row[col] = col_mappings.get(col, '')
+            new_row = {col: col_mappings.get(col, '') for col in df.columns}
             df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
         else:
             if row_index < 0 or row_index >= len(df):
@@ -855,6 +972,7 @@ def update_stakeholder():
         return jsonify({'success': False, 'error': str(e)})
 
 @app.route('/api/delete', methods=['POST'])
+@login_required
 def delete_item():
     try:
         data = request.json
