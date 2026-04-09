@@ -132,7 +132,7 @@ HTML = '''
 </head>
 <body>
     <div class="header">
-        <h1>🇲🇽 MX Customs E-File Compliance Tracker</h1>
+        <h1>🇲🇽 MX E-File Compliance Tracker</h1>
         <p>GTS LATAM | Article 59 MX Customs Law</p>
     </div>
     
@@ -392,4 +392,162 @@ HTML = '''
             
             // Open Phonetool in new tab for verification
             window.open(`https://phonetool.amazon.com/users/${alias}`, '_blank');
-            document.getElementBy
+            document.getElementById('aliasInfo').innerHTML = `<span style="color: #0070c0;">Opened Phonetool for "${alias}" - verify and close the tab</span>`;
+        }
+        
+        // Close modal on outside click
+        document.getElementById('editModal').addEventListener('click', function(e) {
+            if (e.target === this) closeModal();
+        });
+        
+        // Handle form submission
+        document.getElementById('editForm').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            
+            const saveBtn = document.getElementById('saveBtn');
+            saveBtn.disabled = true;
+            saveBtn.textContent = 'Saving...';
+            
+            // Format the date for saving
+            const etaInput = document.getElementById('eta').value;
+            const formattedEta = formatDate(etaInput);
+            
+            const formData = {
+                dataset: document.getElementById('dataset').value,
+                rowIndex: parseInt(document.getElementById('rowIndex').value),
+                team: document.getElementById('team').value,
+                owner: document.getElementById('owner').value.trim(),
+                eta: formattedEta,
+                status: document.getElementById('status').value,
+                ragStatus: document.getElementById('ragStatus').value,
+                priority: document.getElementById('priority').value,
+                reasonRA: document.getElementById('reasonRA').value,
+                pathToGreen: document.getElementById('pathToGreen').value,
+                notes: document.getElementById('notes').value
+            };
+            
+            try {
+                const response = await fetch('/api/update', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(formData)
+                });
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    document.getElementById('successMsg').style.display = 'block';
+                    setTimeout(() => {
+                        closeModal();
+                        location.reload();
+                    }, 1000);
+                } else {
+                    document.getElementById('errorMsg').textContent = result.error || 'Failed to save';
+                    document.getElementById('errorMsg').style.display = 'block';
+                }
+            } catch (err) {
+                document.getElementById('errorMsg').textContent = 'Network error: ' + err.message;
+                document.getElementById('errorMsg').style.display = 'block';
+            }
+            
+            saveBtn.disabled = false;
+            saveBtn.textContent = 'Save Changes';
+        });
+    </script>
+</body>
+</html>
+'''
+
+@app.route('/')
+def home():
+    return view_dataset('action-plan')
+
+@app.route('/<dataset>')
+def view_dataset(dataset):
+    if dataset not in DATASETS:
+        return "Not found", 404
+    
+    result = load_from_s3(dataset)
+    
+    if isinstance(result, str):
+        return render_template_string(HTML, 
+            datasets=DATASETS, active=dataset, title=DATASETS[dataset], 
+            error=result, columns=[], rows=[], stats=None, editable=False, teams=TEAMS)
+    
+    df = result
+    
+    # Calculate stats for action plan
+    stats = None
+    if dataset == 'action-plan' and 'Status' in df.columns:
+        stats = {
+            'total': len(df),
+            'active': len(df[df['Status'] == 'Active']),
+            'progress': len(df[df['Status'] == 'In Progress']),
+            'planned': len(df[df['Status'] == 'Planned'])
+        }
+    
+    # Only action-plan is editable
+    editable = (dataset == 'action-plan')
+    
+    return render_template_string(HTML,
+        datasets=DATASETS, active=dataset, title=DATASETS[dataset],
+        error=None, columns=df.columns.tolist(), rows=df.to_dict('records'),
+        stats=stats, editable=editable, teams=TEAMS)
+
+@app.route('/api/update', methods=['POST'])
+def update_item():
+    try:
+        data = request.json
+        dataset = data.get('dataset')
+        row_index = data.get('rowIndex')
+        
+        if dataset != 'action-plan':
+            return jsonify({'success': False, 'error': 'Only Action Plan is editable'})
+        
+        # Load current data
+        df = load_from_s3(dataset)
+        if isinstance(df, str):
+            return jsonify({'success': False, 'error': df})
+        
+        # Update the row
+        if row_index < 0 or row_index >= len(df):
+            return jsonify({'success': False, 'error': 'Invalid row index'})
+        
+        # Helper function to safely update a cell
+        def safe_update(col, value):
+            if col in df.columns:
+                df.at[row_index, col] = str(value) if value is not None else ''
+        
+        # Update editable fields
+        safe_update('Team', data.get('team', ''))
+        safe_update('Owner', data.get('owner', ''))
+        safe_update('Status', data.get('status', ''))
+        safe_update('RAG Status', data.get('ragStatus', ''))
+        safe_update('Priority', data.get('priority', ''))
+        safe_update('Notes', data.get('notes', ''))
+        safe_update('Reason for R/A', data.get('reasonRA', ''))
+        safe_update('Path to Green', data.get('pathToGreen', ''))
+        
+        # Handle ETA field (might be called 'ETA' or 'Target Date')
+        eta_value = data.get('eta', '')
+        if 'ETA' in df.columns:
+            safe_update('ETA', eta_value)
+        elif 'Target Date' in df.columns:
+            safe_update('Target Date', eta_value)
+        
+        # Save back to S3
+        result = save_to_s3(dataset, df)
+        if result is True:
+            return jsonify({'success': True})
+        else:
+            return jsonify({'success': False, 'error': result})
+            
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+@app.route('/health')
+def health():
+    return jsonify({"status": "ok"})
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=8080)
