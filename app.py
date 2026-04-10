@@ -117,7 +117,6 @@ def parse_date(d):
     return ''
 
 def make_options(options, selected_value):
-    """Generate HTML options with proper selected attribute"""
     html = ''
     for opt in options:
         sel = ' selected' if selected_value == opt else ''
@@ -125,7 +124,6 @@ def make_options(options, selected_value):
     return html
 
 def get_unique_values(rows, column):
-    """Get unique non-empty values for a column"""
     values = set()
     for row in rows:
         val = str(row.get(column, '') or '').strip()
@@ -150,13 +148,11 @@ def render_page(dataset):
         stats = {'total': len(df), 'active': len(df[df['Status']=='Active']), 
                  'progress': len(df[df['Status']=='In Progress']), 'planned': len(df[df['Status']=='Planned'])}
     
-    # Build navigation
     nav_html = ''
     for k, v in DATASETS.items():
         active = 'active' if k == dataset else ''
         nav_html += f'<a href="/{k}" class="{active}">{v}</a>'
     
-    # Build stats
     stats_html = ''
     if stats:
         stats_html = f'''<div class="stats">
@@ -166,31 +162,26 @@ def render_page(dataset):
             <div class="stat"><div class="stat-num">{stats['planned']}</div><div>Planned</div></div>
         </div>'''
     
-    # Build user area
     if user:
         role = '<span class="role admin">Admin</span>' if is_adm else '<span class="role editor">Editor</span>' if is_edt else ''
         user_html = f'<span class="user-info">👤 {esc(user)} {role}</span> <a href="/logout" class="btn">Logout</a>'
     else:
         user_html = '<button class="btn" onclick="showLogin()">Login</button>'
     
-    # Build buttons
     btns = f'<a href="/export/{dataset}/csv" class="btn gray">📥 Export</a>'
     if is_adm:
         btns += ' <button class="btn green" onclick="showAdd()">+ Add New</button>'
     
-    # Build notice
     notice = ''
     if not user:
         notice = '<div class="notice yellow">🔒 View Only - <a href="#" onclick="showLogin();return false">Login</a> or <a href="#" onclick="showSignup();return false">Sign up</a> to edit.</div>'
     elif is_edt and not is_adm:
         notice = '<div class="notice blue">✏️ Editor Mode - Edit using dropdowns or Edit button.</div>'
     
-    # Build unique values for filter dropdowns
     col_unique_values = {}
     for c in columns:
         col_unique_values[c] = get_unique_values(rows, c)
     
-    # Build table
     if error:
         table = f'<div class="error">{esc(error)}</div>'
     else:
@@ -201,20 +192,17 @@ def render_page(dataset):
             table += f'<th>{esc(c)}</th>'
         table += '</tr>'
         
-        # Filter row
         table += '<tr class="filter-row">'
         if is_edt:
             table += '<td></td>'
         for idx, c in enumerate(columns):
             unique_vals = col_unique_values[c]
             if len(unique_vals) <= 20 and len(unique_vals) > 0:
-                # Dropdown for columns with few unique values
                 opts = '<option value="">All</option>'
                 for v in unique_vals:
                     opts += f'<option value="{esc(v)}">{esc(v)}</option>'
                 table += f'<td><select class="filter-input" data-col="{idx}" onchange="applyFilters()">{opts}</select></td>'
             else:
-                # Text input for columns with many unique values
                 table += f'<td><input type="text" class="filter-input" data-col="{idx}" placeholder="Filter..." onkeyup="applyFilters()"></td>'
         table += '</tr></thead><tbody>'
         
@@ -250,93 +238,91 @@ def render_page(dataset):
                     table += f'<td>{esc(val)}</td>'
             table += '</tr>'
         table += '</tbody></table>'
-        
-        # Filter info and clear button
         table += '<div class="filter-info"><span id="filterCount"></span> <button class="btn small" onclick="clearFilters()" style="margin-left:10px">Clear Filters</button></div>'
     
-    # Serialize data for JS
     rows_js = json.dumps(rows).replace('</script>', '<\\/script>')
     cols_js = json.dumps(columns)
+    col_offset_js = '1' if is_edt else '0'
     
-    return f'''<!DOCTYPE html>
+    html = '''<!DOCTYPE html>
 <html>
 <head>
 <title>MX Customs E-File Tracker</title>
 <style>
-*{{box-sizing:border-box}}
-body{{font-family:-apple-system,sans-serif;margin:0;padding:20px;background:#f5f5f5}}
-.header{{background:#003366;color:#fff;padding:20px;margin:-20px -20px 20px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px}}
-.header h1{{margin:0;font-size:22px}}
-.header p{{margin:5px 0 0;opacity:.8;font-size:13px}}
-.nav{{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:20px}}
-.nav a{{padding:10px 18px;background:#003366;color:#fff;text-decoration:none;border-radius:5px;font-size:14px}}
-.nav a:hover,.nav a.active{{background:#0070c0}}
-.card{{background:#fff;padding:20px;border-radius:8px;box-shadow:0 2px 4px rgba(0,0,0,.1);margin-bottom:20px}}
-.card-hdr{{display:flex;justify-content:space-between;align-items:center;margin-bottom:15px;flex-wrap:wrap;gap:10px}}
-.card-hdr h2{{margin:0}}
-.stats{{display:flex;gap:15px;margin-bottom:20px;flex-wrap:wrap}}
-.stat{{background:#fff;padding:15px 25px;border-radius:8px;text-align:center;box-shadow:0 2px 4px rgba(0,0,0,.1)}}
-.stat-num{{font-size:28px;font-weight:700;color:#003366}}
-table{{width:100%;border-collapse:collapse;font-size:12px}}
-th{{background:#003366;color:#fff;padding:8px 5px;text-align:left;white-space:nowrap}}
-td{{padding:6px 5px;border-bottom:1px solid #eee;vertical-align:middle}}
-tr:hover{{background:#f0f7ff}}
-tr.filter-row{{background:#f8f9fa}}
-tr.filter-row:hover{{background:#f8f9fa}}
-tr.filter-row td{{padding:4px 3px;border-bottom:2px solid #003366}}
-.filter-input{{width:100%;padding:4px;border:1px solid #ccc;border-radius:4px;font-size:11px}}
-.filter-input:focus{{border-color:#0070c0;outline:none}}
-.filter-info{{margin-top:10px;font-size:13px;color:#666}}
-.btn{{background:#0070c0;color:#fff;border:none;padding:8px 14px;border-radius:5px;cursor:pointer;text-decoration:none;font-size:13px;display:inline-block}}
-.btn:hover{{background:#005a9e}}
-.btn.gray{{background:#6c757d}}.btn.gray:hover{{background:#5a6268}}
-.btn.green{{background:#28a745}}.btn.green:hover{{background:#218838}}
-.btn.red{{background:#dc3545}}.btn.red:hover{{background:#c82333}}
-.btn.small{{padding:4px 8px;font-size:11px}}
-.inline{{padding:4px;border:1px solid #ddd;border-radius:4px;font-size:11px}}
-.badge{{padding:2px 6px;border-radius:3px;font-size:11px}}
-.badge.active,.badge.rag-green,.badge.p2{{background:#90EE90}}
-.badge.inprogress,.badge.rag-amber,.badge.p1{{background:#FFD700}}
-.badge.planned{{background:#E0E0E0}}
-.badge.complete{{background:#4CAF50;color:#fff}}
-.badge.onhold{{background:#999;color:#fff}}
-.badge.rag-red,.badge.p0{{background:#FF6B6B;color:#fff}}
-.link{{color:#0070c0;text-decoration:none}}.link:hover{{text-decoration:underline}}
-.notice{{padding:10px 15px;border-radius:6px;margin-bottom:15px;font-size:14px}}
-.notice.yellow{{background:#fff3cd;color:#856404}}
-.notice.blue{{background:#d1ecf1;color:#0c5460}}
-.error{{background:#fee;padding:20px;border-radius:8px;color:#c00}}
-.user-info{{color:#fff;font-size:14px}}
-.role{{padding:2px 8px;border-radius:3px;font-size:11px;margin-left:5px}}
-.role.admin{{background:#28a745}}
-.role.editor{{background:#ffc107;color:#333}}
-.modal{{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.5);z-index:1000;align-items:center;justify-content:center}}
-.modal.show{{display:flex}}
-.modal-box{{background:#fff;padding:30px;border-radius:12px;width:90%;max-width:600px;max-height:90vh;overflow-y:auto}}
-.modal-hdr{{display:flex;justify-content:space-between;align-items:center;margin-bottom:20px}}
-.modal-hdr h2{{margin:0;color:#003366}}
-.close{{background:none;border:none;font-size:24px;cursor:pointer;color:#666}}
-.form-group{{margin-bottom:15px}}
-.form-group label{{display:block;margin-bottom:5px;font-weight:600}}
-.form-group input,.form-group select,.form-group textarea{{width:100%;padding:10px;border:1px solid #ddd;border-radius:6px;font-size:14px}}
-.form-group textarea{{min-height:60px;resize:vertical}}
-.msg{{padding:10px;border-radius:6px;margin-bottom:15px;display:none}}
-.msg.ok{{background:#d4edda;color:#155724}}
-.msg.err{{background:#f8d7da;color:#721c24}}
-.hidden{{display:none}}
+*{box-sizing:border-box}
+body{font-family:-apple-system,sans-serif;margin:0;padding:20px;background:#f5f5f5}
+.header{background:#003366;color:#fff;padding:20px;margin:-20px -20px 20px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px}
+.header h1{margin:0;font-size:22px}
+.header p{margin:5px 0 0;opacity:.8;font-size:13px}
+.nav{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:20px}
+.nav a{padding:10px 18px;background:#003366;color:#fff;text-decoration:none;border-radius:5px;font-size:14px}
+.nav a:hover,.nav a.active{background:#0070c0}
+.card{background:#fff;padding:20px;border-radius:8px;box-shadow:0 2px 4px rgba(0,0,0,.1);margin-bottom:20px}
+.card-hdr{display:flex;justify-content:space-between;align-items:center;margin-bottom:15px;flex-wrap:wrap;gap:10px}
+.card-hdr h2{margin:0}
+.stats{display:flex;gap:15px;margin-bottom:20px;flex-wrap:wrap}
+.stat{background:#fff;padding:15px 25px;border-radius:8px;text-align:center;box-shadow:0 2px 4px rgba(0,0,0,.1)}
+.stat-num{font-size:28px;font-weight:700;color:#003366}
+table{width:100%;border-collapse:collapse;font-size:12px}
+th{background:#003366;color:#fff;padding:8px 5px;text-align:left;white-space:nowrap}
+td{padding:6px 5px;border-bottom:1px solid #eee;vertical-align:middle}
+tr:hover{background:#f0f7ff}
+tr.filter-row{background:#f8f9fa}
+tr.filter-row:hover{background:#f8f9fa}
+tr.filter-row td{padding:4px 3px;border-bottom:2px solid #003366}
+.filter-input{width:100%;padding:4px;border:1px solid #ccc;border-radius:4px;font-size:11px}
+.filter-input:focus{border-color:#0070c0;outline:none}
+.filter-info{margin-top:10px;font-size:13px;color:#666}
+.btn{background:#0070c0;color:#fff;border:none;padding:8px 14px;border-radius:5px;cursor:pointer;text-decoration:none;font-size:13px;display:inline-block}
+.btn:hover{background:#005a9e}
+.btn.gray{background:#6c757d}.btn.gray:hover{background:#5a6268}
+.btn.green{background:#28a745}.btn.green:hover{background:#218838}
+.btn.red{background:#dc3545}.btn.red:hover{background:#c82333}
+.btn.small{padding:4px 8px;font-size:11px}
+.inline{padding:4px;border:1px solid #ddd;border-radius:4px;font-size:11px}
+.badge{padding:2px 6px;border-radius:3px;font-size:11px}
+.badge.active,.badge.rag-green,.badge.p2{background:#90EE90}
+.badge.inprogress,.badge.rag-amber,.badge.p1{background:#FFD700}
+.badge.planned{background:#E0E0E0}
+.badge.complete{background:#4CAF50;color:#fff}
+.badge.onhold{background:#999;color:#fff}
+.badge.rag-red,.badge.p0{background:#FF6B6B;color:#fff}
+.link{color:#0070c0;text-decoration:none}.link:hover{text-decoration:underline}
+.notice{padding:10px 15px;border-radius:6px;margin-bottom:15px;font-size:14px}
+.notice.yellow{background:#fff3cd;color:#856404}
+.notice.blue{background:#d1ecf1;color:#0c5460}
+.error{background:#fee;padding:20px;border-radius:8px;color:#c00}
+.user-info{color:#fff;font-size:14px}
+.role{padding:2px 8px;border-radius:3px;font-size:11px;margin-left:5px}
+.role.admin{background:#28a745}
+.role.editor{background:#ffc107;color:#333}
+.modal{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.5);z-index:1000;align-items:center;justify-content:center}
+.modal.show{display:flex}
+.modal-box{background:#fff;padding:30px;border-radius:12px;width:90%;max-width:600px;max-height:90vh;overflow-y:auto}
+.modal-hdr{display:flex;justify-content:space-between;align-items:center;margin-bottom:20px}
+.modal-hdr h2{margin:0;color:#003366}
+.close{background:none;border:none;font-size:24px;cursor:pointer;color:#666}
+.form-group{margin-bottom:15px}
+.form-group label{display:block;margin-bottom:5px;font-weight:600}
+.form-group input,.form-group select,.form-group textarea{width:100%;padding:10px;border:1px solid #ddd;border-radius:6px;font-size:14px}
+.form-group textarea{min-height:60px;resize:vertical}
+.msg{padding:10px;border-radius:6px;margin-bottom:15px;display:none}
+.msg.ok{background:#d4edda;color:#155724}
+.msg.err{background:#f8d7da;color:#721c24}
+.hidden{display:none}
 </style>
 </head>
 <body>
 <div class="header">
 <div><h1>🇲🇽 MX Customs E-File Compliance Tracker</h1><p>GTS LATAM | Article 59 MX Customs Law</p></div>
-<div>{user_html}</div>
+<div>%%USER_HTML%%</div>
 </div>
-<div class="nav">{nav_html}</div>
-{stats_html}
+<div class="nav">%%NAV_HTML%%</div>
+%%STATS_HTML%%
 <div class="card">
-<div class="card-hdr"><h2>{DATASETS[dataset]}</h2><div>{btns}</div></div>
-{notice}
-<div style="overflow-x:auto">{table}</div>
+<div class="card-hdr"><h2>%%TITLE%%</h2><div>%%BTNS%%</div></div>
+%%NOTICE%%
+<div style="overflow-x:auto">%%TABLE%%</div>
 </div>
 
 <div id="loginModal" class="modal">
@@ -378,156 +364,177 @@ tr.filter-row td{{padding:4px 3px;border-bottom:2px solid #003366}}
 </div>
 
 <script>
-var DATA={{rows:{rows_js},cols:{cols_js},ds:"{dataset}",teams:{json.dumps(TEAMS)},phases:{json.dumps(PHASES)},ws:{json.dumps(WORKSTREAMS)},st:{json.dumps(STATUSES)},rag:{json.dumps(RAG_STATUSES)}}};
+var DATA={rows:%%ROWS_JS%%,cols:%%COLS_JS%%,ds:"%%DATASET%%",teams:%%TEAMS_JS%%,phases:%%PHASES_JS%%,ws:%%WS_JS%%,st:%%ST_JS%%,rag:%%RAG_JS%%};
 var editIdx=-1,isNew=false;
-var colOffset={"is_edt_js"};
+var colOffset=%%COL_OFFSET%%;
 
-function showLogin(){{document.getElementById('loginModal').classList.add('show');document.getElementById('loginErr').style.display='none';}}
-function showSignup(){{document.getElementById('signupModal').classList.add('show');document.getElementById('signupErr').style.display='none';document.getElementById('signupOk').style.display='none';document.getElementById('signupForm').style.display='block';}}
-function hideModal(id){{document.getElementById(id).classList.remove('show');}}
+function showLogin(){document.getElementById('loginModal').classList.add('show');document.getElementById('loginErr').style.display='none';}
+function showSignup(){document.getElementById('signupModal').classList.add('show');document.getElementById('signupErr').style.display='none';document.getElementById('signupOk').style.display='none';document.getElementById('signupForm').style.display='block';}
+function hideModal(id){document.getElementById(id).classList.remove('show');}
 
-function applyFilters(){{
+function applyFilters(){
     var table=document.getElementById('dataTable');
+    if(!table)return;
     var filters=document.querySelectorAll('.filter-input');
     var filterVals=[];
-    filters.forEach(function(f){{filterVals.push(f.value.toLowerCase());}});
+    filters.forEach(function(f){filterVals.push(f.value.toLowerCase());});
     
     var rows=table.querySelectorAll('tbody tr');
     var visibleCount=0;
     var totalCount=rows.length;
     
-    rows.forEach(function(row){{
+    rows.forEach(function(row){
         var cells=row.querySelectorAll('td');
         var show=true;
-        filterVals.forEach(function(fv,idx){{
-            if(fv){{
+        filterVals.forEach(function(fv,idx){
+            if(fv){
                 var cellIdx=idx+colOffset;
-                if(cells[cellIdx]){{
+                if(cells[cellIdx]){
                     var cellText=cells[cellIdx].textContent.toLowerCase();
                     if(cellText.indexOf(fv)===-1)show=false;
-                }}
-            }}
-        }});
-        if(show){{row.classList.remove('hidden');visibleCount++;}}
-        else{{row.classList.add('hidden');}}
-    }});
+                }
+            }
+        });
+        if(show){row.classList.remove('hidden');visibleCount++;}
+        else{row.classList.add('hidden');}
+    });
     
     document.getElementById('filterCount').textContent='Showing '+visibleCount+' of '+totalCount+' items';
-}}
+}
 
-function clearFilters(){{
-    document.querySelectorAll('.filter-input').forEach(function(f){{
+function clearFilters(){
+    document.querySelectorAll('.filter-input').forEach(function(f){
         if(f.tagName==='SELECT')f.selectedIndex=0;
         else f.value='';
-    }});
-    document.querySelectorAll('#dataTable tbody tr').forEach(function(r){{r.classList.remove('hidden');}});
+    });
+    document.querySelectorAll('#dataTable tbody tr').forEach(function(r){r.classList.remove('hidden');});
     document.getElementById('filterCount').textContent='';
-}}
+}
 
-function doLogin(e){{
+function doLogin(e){
 e.preventDefault();
 var alias=document.getElementById('loginAlias').value.trim().toLowerCase();
-fetch('/api/login',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{alias:alias}})}})
-.then(function(r){{return r.json();}}).then(function(d){{if(d.success)location.reload();else{{document.getElementById('loginErr').textContent=d.error||'Failed';document.getElementById('loginErr').style.display='block';}}}});
-}}
+fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({alias:alias})})
+.then(function(r){return r.json();}).then(function(d){if(d.success)location.reload();else{document.getElementById('loginErr').textContent=d.error||'Failed';document.getElementById('loginErr').style.display='block';}});
+}
 
-function doSignup(e){{
+function doSignup(e){
 e.preventDefault();
 var alias=document.getElementById('signupAlias').value.trim().toLowerCase();
-fetch('/api/signup',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{alias:alias}})}})
-.then(function(r){{return r.json();}}).then(function(d){{if(d.success){{document.getElementById('signupOk').innerHTML='✓ Welcome '+alias+'!';document.getElementById('signupOk').style.display='block';document.getElementById('signupForm').style.display='none';setTimeout(function(){{location.reload();}},1500);}}else{{document.getElementById('signupErr').textContent=d.error||'Failed';document.getElementById('signupErr').style.display='block';}}}});
-}}
+fetch('/api/signup',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({alias:alias})})
+.then(function(r){return r.json();}).then(function(d){if(d.success){document.getElementById('signupOk').innerHTML='✓ Welcome '+alias+'!';document.getElementById('signupOk').style.display='block';document.getElementById('signupForm').style.display='none';setTimeout(function(){location.reload();},1500);}else{document.getElementById('signupErr').textContent=d.error||'Failed';document.getElementById('signupErr').style.display='block';}});
+}
 
-function inlineUpd(idx,col,val){{
-if(col==='ETA'&&val){{var p=val.split('-');if(p.length===3)val=p[1]+'/'+p[2]+'/'+p[0];}}
-fetch('/api/inline-update',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{dataset:DATA.ds,rowIndex:idx,column:col,value:val}})}})
-.then(function(r){{return r.json();}}).then(function(d){{if(!d.success){{alert(d.error||'Error');location.reload();}}}});
-}}
+function inlineUpd(idx,col,val){
+if(col==='ETA'&&val){var p=val.split('-');if(p.length===3)val=p[1]+'/'+p[2]+'/'+p[0];}
+fetch('/api/inline-update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({dataset:DATA.ds,rowIndex:idx,column:col,value:val})})
+.then(function(r){return r.json();}).then(function(d){if(!d.success){alert(d.error||'Error');location.reload();}});
+}
 
-function showAdd(){{
+function showAdd(){
 isNew=true;editIdx=-1;
 document.getElementById('editTitle').textContent='Add New';
 buildForm(null);
 document.getElementById('editOk').style.display='none';
 document.getElementById('editErr').style.display='none';
 document.getElementById('editModal').classList.add('show');
-}}
+}
 
-function showEdit(idx){{
+function showEdit(idx){
 isNew=false;editIdx=idx;
 document.getElementById('editTitle').textContent='Edit Item';
 buildForm(DATA.rows[idx]);
 document.getElementById('editOk').style.display='none';
 document.getElementById('editErr').style.display='none';
 document.getElementById('editModal').classList.add('show');
-}}
+}
 
-function getFields(){{
+function getFields(){
 if(DATA.ds==='action-plan')return[
-{{n:'Action ID',t:'text',r:1}},{{n:'Phase',t:'sel',o:DATA.phases}},{{n:'Workstream',t:'sel',o:DATA.ws}},
-{{n:'Action Item',t:'area',r:1}},{{n:'Team',t:'sel',o:[''].concat(DATA.teams)}},{{n:'Owner',t:'text'}},
-{{n:'Dependencies',t:'text'}},{{n:'ETA',t:'date'}},{{n:'Status',t:'sel',o:DATA.st}},
-{{n:'Priority',t:'sel',o:['P0','P1','P2']}},{{n:'RAG Status',t:'sel',o:DATA.rag}},
-{{n:'Reason for R/A',t:'area'}},{{n:'Path to Green',t:'area'}},{{n:'Notes',t:'area'}}];
+{n:'Action ID',t:'text',r:1},{n:'Phase',t:'sel',o:DATA.phases},{n:'Workstream',t:'sel',o:DATA.ws},
+{n:'Action Item',t:'area',r:1},{n:'Team',t:'sel',o:[''].concat(DATA.teams)},{n:'Owner',t:'text'},
+{n:'Dependencies',t:'text'},{n:'ETA',t:'date'},{n:'Status',t:'sel',o:DATA.st},
+{n:'Priority',t:'sel',o:['P0','P1','P2']},{n:'RAG Status',t:'sel',o:DATA.rag},
+{n:'Reason for R/A',t:'area'},{n:'Path to Green',t:'area'},{n:'Notes',t:'area'}];
 if(DATA.ds==='stakeholder-matrix')return[
-{{n:'Team',t:'sel',o:[''].concat(DATA.teams)}},{{n:'Stakeholder',t:'text'}},{{n:'Role',t:'text'}},
-{{n:'Involvement',t:'sel',o:['High','Medium','Low']}},{{n:'Communication',t:'sel',o:['Email','Chime','Meetings','Slack']}},
-{{n:'Responsibilities',t:'area'}},{{n:'Notes',t:'area'}}];
-return DATA.cols.map(function(c){{return {{n:c,t:'text'}};}});
-}}
+{n:'Team',t:'sel',o:[''].concat(DATA.teams)},{n:'Stakeholder',t:'text'},{n:'Role',t:'text'},
+{n:'Involvement',t:'sel',o:['High','Medium','Low']},{n:'Communication',t:'sel',o:['Email','Chime','Meetings','Slack']},
+{n:'Responsibilities',t:'area'},{n:'Notes',t:'area'}];
+return DATA.cols.map(function(c){return {n:c,t:'text'};});
+}
 
-function parseD(d){{if(!d||d==='nan')return'';var m=d.match(/^(\d{{1,2}})\/(\d{{1,2}})\/(\d{{4}})$/);if(m)return m[3]+'-'+m[1].padStart(2,'0')+'-'+m[2].padStart(2,'0');return/^\d{{4}}-\d{{2}}-\d{{2}}$/.test(d)?d:'';}}
+function parseD(d){if(!d||d==='nan')return'';var m=d.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);if(m)return m[3]+'-'+m[1].padStart(2,'0')+'-'+m[2].padStart(2,'0');return/^\d{4}-\d{2}-\d{2}$/.test(d)?d:'';}
 
-function makeOpts(opts,val){{
+function makeOpts(opts,val){
 var html='';
-for(var i=0;i<opts.length;i++){{
+for(var i=0;i<opts.length;i++){
 var sel=(opts[i]===val)?' selected':'';
 html+='<option value="'+opts[i]+'"'+sel+'>'+opts[i]+'</option>';
-}}
+}
 return html;
-}}
+}
 
-function buildForm(row){{
+function buildForm(row){
 var fields=getFields(),html='';
 var autoId='';
-if(isNew&&DATA.ds==='action-plan'){{var mx=0;DATA.rows.forEach(function(r){{var m=(r['Action ID']||'').match(/AP-(\d+)/);if(m)mx=Math.max(mx,parseInt(m[1]));}}); autoId='AP-'+String(mx+1).padStart(3,'0');}}
-fields.forEach(function(f,i){{
+if(isNew&&DATA.ds==='action-plan'){var mx=0;DATA.rows.forEach(function(r){var m=(r['Action ID']||'').match(/AP-(\d+)/);if(m)mx=Math.max(mx,parseInt(m[1]));}); autoId='AP-'+String(mx+1).padStart(3,'0');}
+fields.forEach(function(f,i){
 var v=row?(row[f.n]||''):'';
 if(isNew&&f.n==='Action ID'&&autoId)v=autoId;
 var id='f'+i;
 html+='<div class="form-group"><label>'+f.n+(f.r?' *':'')+'</label>';
-if(f.t==='sel'){{html+='<select id="'+id+'">'+makeOpts(f.o,v)+'</select>';}}
+if(f.t==='sel'){html+='<select id="'+id+'">'+makeOpts(f.o,v)+'</select>';}
 else if(f.t==='area')html+='<textarea id="'+id+'">'+v.replace(/</g,'&lt;')+'</textarea>';
 else if(f.t==='date')html+='<input type="date" id="'+id+'" value="'+parseD(v)+'">';
 else html+='<input type="text" id="'+id+'" value="'+v.replace(/"/g,'&quot;')+'"'+(f.r?' required':'')+'>';
 html+='</div>';
-}});
+});
 document.getElementById('editFields').innerHTML=html;
-}}
+}
 
-function doSave(e){{
+function doSave(e){
 e.preventDefault();
-var fields=getFields(),data={{dataset:DATA.ds,rowIndex:editIdx,isNew:isNew,fields:{{}}}};
-fields.forEach(function(f,i){{
+var fields=getFields(),data={dataset:DATA.ds,rowIndex:editIdx,isNew:isNew,fields:{}};
+fields.forEach(function(f,i){
 var el=document.getElementById('f'+i),v=el?el.value:'';
-if(f.t==='date'&&v){{var p=v.split('-');if(p.length===3)v=p[1]+'/'+p[2]+'/'+p[0];}}
+if(f.t==='date'&&v){var p=v.split('-');if(p.length===3)v=p[1]+'/'+p[2]+'/'+p[0];}
 data.fields[f.n]=v;
-}});
-fetch('/api/update-generic',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(data)}})
-.then(function(r){{return r.json();}}).then(function(d){{if(d.success){{document.getElementById('editOk').style.display='block';setTimeout(function(){{location.reload();}},1000);}}else{{document.getElementById('editErr').textContent=d.error||'Failed';document.getElementById('editErr').style.display='block';}}}});
-}}
+});
+fetch('/api/update-generic',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)})
+.then(function(r){return r.json();}).then(function(d){if(d.success){document.getElementById('editOk').style.display='block';setTimeout(function(){location.reload();},1000);}else{document.getElementById('editErr').textContent=d.error||'Failed';document.getElementById('editErr').style.display='block';}});
+}
 
-function doDelete(idx){{
+function doDelete(idx){
 var name=DATA.rows[idx]['Action ID']||DATA.rows[idx]['Team']||'Item '+(idx+1);
 if(!confirm('Delete "'+name+'"?'))return;
-fetch('/api/delete',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{dataset:DATA.ds,rowIndex:idx}})}})
-.then(function(r){{return r.json();}}).then(function(d){{if(d.success)location.reload();else alert(d.error||'Error');}});
-}}
+fetch('/api/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({dataset:DATA.ds,rowIndex:idx})})
+.then(function(r){return r.json();}).then(function(d){if(d.success)location.reload();else alert(d.error||'Error');});
+}
 
-document.querySelectorAll('.modal').forEach(function(m){{m.addEventListener('click',function(e){{if(e.target===m)m.classList.remove('show');}});}});
+document.querySelectorAll('.modal').forEach(function(m){m.addEventListener('click',function(e){if(e.target===m)m.classList.remove('show');});});
 </script>
 </body>
-</html>'''.replace('{"is_edt_js"}', '1' if is_edt else '0')
+</html>'''
+    
+    # Replace placeholders
+    html = html.replace('%%USER_HTML%%', user_html)
+    html = html.replace('%%NAV_HTML%%', nav_html)
+    html = html.replace('%%STATS_HTML%%', stats_html)
+    html = html.replace('%%TITLE%%', DATASETS[dataset])
+    html = html.replace('%%BTNS%%', btns)
+    html = html.replace('%%NOTICE%%', notice)
+    html = html.replace('%%TABLE%%', table)
+    html = html.replace('%%ROWS_JS%%', rows_js)
+    html = html.replace('%%COLS_JS%%', cols_js)
+    html = html.replace('%%DATASET%%', dataset)
+    html = html.replace('%%TEAMS_JS%%', json.dumps(TEAMS))
+    html = html.replace('%%PHASES_JS%%', json.dumps(PHASES))
+    html = html.replace('%%WS_JS%%', json.dumps(WORKSTREAMS))
+    html = html.replace('%%ST_JS%%', json.dumps(STATUSES))
+    html = html.replace('%%RAG_JS%%', json.dumps(RAG_STATUSES))
+    html = html.replace('%%COL_OFFSET%%', col_offset_js)
+    
+    return html
 
 @app.route('/')
 def home():
