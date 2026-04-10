@@ -116,6 +116,23 @@ def parse_date(d):
         return str(d)
     return ''
 
+def make_options(options, selected_value):
+    """Generate HTML options with proper selected attribute"""
+    html = ''
+    for opt in options:
+        sel = ' selected' if selected_value == opt else ''
+        html += f'<option value="{esc(opt)}"{sel}>{esc(opt)}</option>'
+    return html
+
+def get_unique_values(rows, column):
+    """Get unique non-empty values for a column"""
+    values = set()
+    for row in rows:
+        val = str(row.get(column, '') or '').strip()
+        if val:
+            values.add(val)
+    return sorted(values)
+
 def render_page(dataset):
     user = session.get('user')
     is_adm = is_admin()
@@ -157,7 +174,7 @@ def render_page(dataset):
         user_html = '<button class="btn" onclick="showLogin()">Login</button>'
     
     # Build buttons
-    btns = f'<a href="/export/{dataset}/excel" class="btn gray">📥 Excel</a> <a href="/export/{dataset}/csv" class="btn gray">📥 CSV</a>'
+    btns = f'<a href="/export/{dataset}/csv" class="btn gray">📥 Export</a>'
     if is_adm:
         btns += ' <button class="btn green" onclick="showAdd()">+ Add New</button>'
     
@@ -168,19 +185,41 @@ def render_page(dataset):
     elif is_edt and not is_adm:
         notice = '<div class="notice blue">✏️ Editor Mode - Edit using dropdowns or Edit button.</div>'
     
+    # Build unique values for filter dropdowns
+    col_unique_values = {}
+    for c in columns:
+        col_unique_values[c] = get_unique_values(rows, c)
+    
     # Build table
     if error:
         table = f'<div class="error">{esc(error)}</div>'
     else:
-        table = '<table><thead><tr>'
+        table = '<table id="dataTable"><thead><tr>'
         if is_edt:
             table += '<th>Actions</th>'
         for c in columns:
             table += f'<th>{esc(c)}</th>'
+        table += '</tr>'
+        
+        # Filter row
+        table += '<tr class="filter-row">'
+        if is_edt:
+            table += '<td></td>'
+        for idx, c in enumerate(columns):
+            unique_vals = col_unique_values[c]
+            if len(unique_vals) <= 20 and len(unique_vals) > 0:
+                # Dropdown for columns with few unique values
+                opts = '<option value="">All</option>'
+                for v in unique_vals:
+                    opts += f'<option value="{esc(v)}">{esc(v)}</option>'
+                table += f'<td><select class="filter-input" data-col="{idx}" onchange="applyFilters()">{opts}</select></td>'
+            else:
+                # Text input for columns with many unique values
+                table += f'<td><input type="text" class="filter-input" data-col="{idx}" placeholder="Filter..." onkeyup="applyFilters()"></td>'
         table += '</tr></thead><tbody>'
         
         for i, row in enumerate(rows):
-            table += f'<tr>'
+            table += f'<tr data-row="{i}">'
             if is_edt:
                 table += f'<td><button class="btn small" onclick="showEdit({i})">Edit</button>'
                 if is_adm:
@@ -193,10 +232,10 @@ def render_page(dataset):
                 if dataset == 'action-plan' and c == 'ETA' and is_edt:
                     table += f'<td><input type="date" class="inline" value="{parse_date(val)}" onchange="inlineUpd({i},\'ETA\',this.value)"></td>'
                 elif dataset == 'action-plan' and c == 'Status' and is_edt:
-                    opts = ''.join([f'<option{"selected"if val==s else""}>{s}</option>' for s in STATUSES])
+                    opts = make_options(STATUSES, val)
                     table += f'<td><select class="inline" onchange="inlineUpd({i},\'Status\',this.value)">{opts}</select></td>'
                 elif dataset == 'action-plan' and c == 'RAG Status' and is_edt:
-                    opts = ''.join([f'<option{"selected"if val==s else""}>{s}</option>' for s in RAG_STATUSES])
+                    opts = make_options(RAG_STATUSES, val)
                     table += f'<td><select class="inline" onchange="inlineUpd({i},\'RAG Status\',this.value)">{opts}</select></td>'
                 elif c == 'Status':
                     cls = val.lower().replace(' ', '')
@@ -211,6 +250,9 @@ def render_page(dataset):
                     table += f'<td>{esc(val)}</td>'
             table += '</tr>'
         table += '</tbody></table>'
+        
+        # Filter info and clear button
+        table += '<div class="filter-info"><span id="filterCount"></span> <button class="btn small" onclick="clearFilters()" style="margin-left:10px">Clear Filters</button></div>'
     
     # Serialize data for JS
     rows_js = json.dumps(rows).replace('</script>', '<\\/script>')
@@ -239,6 +281,12 @@ table{{width:100%;border-collapse:collapse;font-size:12px}}
 th{{background:#003366;color:#fff;padding:8px 5px;text-align:left;white-space:nowrap}}
 td{{padding:6px 5px;border-bottom:1px solid #eee;vertical-align:middle}}
 tr:hover{{background:#f0f7ff}}
+tr.filter-row{{background:#f8f9fa}}
+tr.filter-row:hover{{background:#f8f9fa}}
+tr.filter-row td{{padding:4px 3px;border-bottom:2px solid #003366}}
+.filter-input{{width:100%;padding:4px;border:1px solid #ccc;border-radius:4px;font-size:11px}}
+.filter-input:focus{{border-color:#0070c0;outline:none}}
+.filter-info{{margin-top:10px;font-size:13px;color:#666}}
 .btn{{background:#0070c0;color:#fff;border:none;padding:8px 14px;border-radius:5px;cursor:pointer;text-decoration:none;font-size:13px;display:inline-block}}
 .btn:hover{{background:#005a9e}}
 .btn.gray{{background:#6c757d}}.btn.gray:hover{{background:#5a6268}}
@@ -275,6 +323,7 @@ tr:hover{{background:#f0f7ff}}
 .msg{{padding:10px;border-radius:6px;margin-bottom:15px;display:none}}
 .msg.ok{{background:#d4edda;color:#155724}}
 .msg.err{{background:#f8d7da;color:#721c24}}
+.hidden{{display:none}}
 </style>
 </head>
 <body>
@@ -331,29 +380,68 @@ tr:hover{{background:#f0f7ff}}
 <script>
 var DATA={{rows:{rows_js},cols:{cols_js},ds:"{dataset}",teams:{json.dumps(TEAMS)},phases:{json.dumps(PHASES)},ws:{json.dumps(WORKSTREAMS)},st:{json.dumps(STATUSES)},rag:{json.dumps(RAG_STATUSES)}}};
 var editIdx=-1,isNew=false;
+var colOffset={"is_edt_js"};
 
 function showLogin(){{document.getElementById('loginModal').classList.add('show');document.getElementById('loginErr').style.display='none';}}
 function showSignup(){{document.getElementById('signupModal').classList.add('show');document.getElementById('signupErr').style.display='none';document.getElementById('signupOk').style.display='none';document.getElementById('signupForm').style.display='block';}}
 function hideModal(id){{document.getElementById(id).classList.remove('show');}}
 
+function applyFilters(){{
+    var table=document.getElementById('dataTable');
+    var filters=document.querySelectorAll('.filter-input');
+    var filterVals=[];
+    filters.forEach(function(f){{filterVals.push(f.value.toLowerCase());}});
+    
+    var rows=table.querySelectorAll('tbody tr');
+    var visibleCount=0;
+    var totalCount=rows.length;
+    
+    rows.forEach(function(row){{
+        var cells=row.querySelectorAll('td');
+        var show=true;
+        filterVals.forEach(function(fv,idx){{
+            if(fv){{
+                var cellIdx=idx+colOffset;
+                if(cells[cellIdx]){{
+                    var cellText=cells[cellIdx].textContent.toLowerCase();
+                    if(cellText.indexOf(fv)===-1)show=false;
+                }}
+            }}
+        }});
+        if(show){{row.classList.remove('hidden');visibleCount++;}}
+        else{{row.classList.add('hidden');}}
+    }});
+    
+    document.getElementById('filterCount').textContent='Showing '+visibleCount+' of '+totalCount+' items';
+}}
+
+function clearFilters(){{
+    document.querySelectorAll('.filter-input').forEach(function(f){{
+        if(f.tagName==='SELECT')f.selectedIndex=0;
+        else f.value='';
+    }});
+    document.querySelectorAll('#dataTable tbody tr').forEach(function(r){{r.classList.remove('hidden');}});
+    document.getElementById('filterCount').textContent='';
+}}
+
 function doLogin(e){{
 e.preventDefault();
 var alias=document.getElementById('loginAlias').value.trim().toLowerCase();
 fetch('/api/login',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{alias:alias}})}})
-.then(r=>r.json()).then(d=>{{if(d.success)location.reload();else{{document.getElementById('loginErr').textContent=d.error||'Failed';document.getElementById('loginErr').style.display='block';}}}});
+.then(function(r){{return r.json();}}).then(function(d){{if(d.success)location.reload();else{{document.getElementById('loginErr').textContent=d.error||'Failed';document.getElementById('loginErr').style.display='block';}}}});
 }}
 
 function doSignup(e){{
 e.preventDefault();
 var alias=document.getElementById('signupAlias').value.trim().toLowerCase();
 fetch('/api/signup',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{alias:alias}})}})
-.then(r=>r.json()).then(d=>{{if(d.success){{document.getElementById('signupOk').innerHTML='✓ Welcome '+alias+'!';document.getElementById('signupOk').style.display='block';document.getElementById('signupForm').style.display='none';setTimeout(()=>location.reload(),1500);}}else{{document.getElementById('signupErr').textContent=d.error||'Failed';document.getElementById('signupErr').style.display='block';}}}});
+.then(function(r){{return r.json();}}).then(function(d){{if(d.success){{document.getElementById('signupOk').innerHTML='✓ Welcome '+alias+'!';document.getElementById('signupOk').style.display='block';document.getElementById('signupForm').style.display='none';setTimeout(function(){{location.reload();}},1500);}}else{{document.getElementById('signupErr').textContent=d.error||'Failed';document.getElementById('signupErr').style.display='block';}}}});
 }}
 
 function inlineUpd(idx,col,val){{
 if(col==='ETA'&&val){{var p=val.split('-');if(p.length===3)val=p[1]+'/'+p[2]+'/'+p[0];}}
 fetch('/api/inline-update',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{dataset:DATA.ds,rowIndex:idx,column:col,value:val}})}})
-.then(r=>r.json()).then(d=>{{if(!d.success){{alert(d.error||'Error');location.reload();}}}});
+.then(function(r){{return r.json();}}).then(function(d){{if(!d.success){{alert(d.error||'Error');location.reload();}}}});
 }}
 
 function showAdd(){{
@@ -385,21 +473,30 @@ if(DATA.ds==='stakeholder-matrix')return[
 {{n:'Team',t:'sel',o:[''].concat(DATA.teams)}},{{n:'Stakeholder',t:'text'}},{{n:'Role',t:'text'}},
 {{n:'Involvement',t:'sel',o:['High','Medium','Low']}},{{n:'Communication',t:'sel',o:['Email','Chime','Meetings','Slack']}},
 {{n:'Responsibilities',t:'area'}},{{n:'Notes',t:'area'}}];
-return DATA.cols.map(c=>({{n:c,t:'text'}}));
+return DATA.cols.map(function(c){{return {{n:c,t:'text'}};}});
 }}
 
-function parseD(d){{if(!d||d==='nan')return'';var m=d.match(/^(\\d{{1,2}})\\/(\\d{{1,2}})\\/(\\d{{4}})$/);if(m)return m[3]+'-'+m[1].padStart(2,'0')+'-'+m[2].padStart(2,'0');return/^\\d{{4}}-\\d{{2}}-\\d{{2}}$/.test(d)?d:'';}}
+function parseD(d){{if(!d||d==='nan')return'';var m=d.match(/^(\d{{1,2}})\/(\d{{1,2}})\/(\d{{4}})$/);if(m)return m[3]+'-'+m[1].padStart(2,'0')+'-'+m[2].padStart(2,'0');return/^\d{{4}}-\d{{2}}-\d{{2}}$/.test(d)?d:'';}}
+
+function makeOpts(opts,val){{
+var html='';
+for(var i=0;i<opts.length;i++){{
+var sel=(opts[i]===val)?' selected':'';
+html+='<option value="'+opts[i]+'"'+sel+'>'+opts[i]+'</option>';
+}}
+return html;
+}}
 
 function buildForm(row){{
 var fields=getFields(),html='';
 var autoId='';
-if(isNew&&DATA.ds==='action-plan'){{var mx=0;DATA.rows.forEach(r=>{{var m=(r['Action ID']||'').match(/AP-(\\d+)/);if(m)mx=Math.max(mx,parseInt(m[1]));}}); autoId='AP-'+String(mx+1).padStart(3,'0');}}
-fields.forEach((f,i)=>{{
+if(isNew&&DATA.ds==='action-plan'){{var mx=0;DATA.rows.forEach(function(r){{var m=(r['Action ID']||'').match(/AP-(\d+)/);if(m)mx=Math.max(mx,parseInt(m[1]));}}); autoId='AP-'+String(mx+1).padStart(3,'0');}}
+fields.forEach(function(f,i){{
 var v=row?(row[f.n]||''):'';
 if(isNew&&f.n==='Action ID'&&autoId)v=autoId;
 var id='f'+i;
 html+='<div class="form-group"><label>'+f.n+(f.r?' *':'')+'</label>';
-if(f.t==='sel'){{html+='<select id="'+id+'">';f.o.forEach(o=>{{html+='<option'+(v===o?' selected':'')+'>'+o+'</option>';}});html+='</select>';}}
+if(f.t==='sel'){{html+='<select id="'+id+'">'+makeOpts(f.o,v)+'</select>';}}
 else if(f.t==='area')html+='<textarea id="'+id+'">'+v.replace(/</g,'&lt;')+'</textarea>';
 else if(f.t==='date')html+='<input type="date" id="'+id+'" value="'+parseD(v)+'">';
 else html+='<input type="text" id="'+id+'" value="'+v.replace(/"/g,'&quot;')+'"'+(f.r?' required':'')+'>';
@@ -411,26 +508,26 @@ document.getElementById('editFields').innerHTML=html;
 function doSave(e){{
 e.preventDefault();
 var fields=getFields(),data={{dataset:DATA.ds,rowIndex:editIdx,isNew:isNew,fields:{{}}}};
-fields.forEach((f,i)=>{{
+fields.forEach(function(f,i){{
 var el=document.getElementById('f'+i),v=el?el.value:'';
 if(f.t==='date'&&v){{var p=v.split('-');if(p.length===3)v=p[1]+'/'+p[2]+'/'+p[0];}}
 data.fields[f.n]=v;
 }});
 fetch('/api/update-generic',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(data)}})
-.then(r=>r.json()).then(d=>{{if(d.success){{document.getElementById('editOk').style.display='block';setTimeout(()=>location.reload(),1000);}}else{{document.getElementById('editErr').textContent=d.error||'Failed';document.getElementById('editErr').style.display='block';}}}});
+.then(function(r){{return r.json();}}).then(function(d){{if(d.success){{document.getElementById('editOk').style.display='block';setTimeout(function(){{location.reload();}},1000);}}else{{document.getElementById('editErr').textContent=d.error||'Failed';document.getElementById('editErr').style.display='block';}}}});
 }}
 
 function doDelete(idx){{
 var name=DATA.rows[idx]['Action ID']||DATA.rows[idx]['Team']||'Item '+(idx+1);
 if(!confirm('Delete "'+name+'"?'))return;
 fetch('/api/delete',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{dataset:DATA.ds,rowIndex:idx}})}})
-.then(r=>r.json()).then(d=>{{if(d.success)location.reload();else alert(d.error||'Error');}});
+.then(function(r){{return r.json();}}).then(function(d){{if(d.success)location.reload();else alert(d.error||'Error');}});
 }}
 
-document.querySelectorAll('.modal').forEach(m=>m.addEventListener('click',e=>{{if(e.target===m)m.classList.remove('show');}}));
+document.querySelectorAll('.modal').forEach(function(m){{m.addEventListener('click',function(e){{if(e.target===m)m.classList.remove('show');}});}});
 </script>
 </body>
-</html>'''
+</html>'''.replace('{"is_edt_js"}', '1' if is_edt else '0')
 
 @app.route('/')
 def home():
@@ -477,20 +574,6 @@ def signup():
 def logout():
     session.pop('user', None)
     return redirect('/')
-
-@app.route('/export/<dataset>/excel')
-def export_excel(dataset):
-    if dataset not in DATASETS:
-        return "Not found", 404
-    df = load_from_s3(dataset)
-    if isinstance(df, str):
-        return f"Error: {df}", 500
-    out = BytesIO()
-    with pd.ExcelWriter(out, engine='openpyxl') as w:
-        df.to_excel(w, index=False, sheet_name=DATASETS[dataset][:31])
-    out.seek(0)
-    return Response(out.getvalue(), mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-                    headers={'Content-Disposition': f'attachment; filename=MX_EFile_{dataset}_{datetime.now().strftime("%Y%m%d")}.xlsx'})
 
 @app.route('/export/<dataset>/csv')
 def export_csv(dataset):
