@@ -12,11 +12,9 @@ from functools import wraps
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', 'mx-efile-tracker-secret-2026')
 
-# Configuration
 S3_BUCKET = os.environ.get('S3_BUCKET', 'gts-latam-efile-tracker')
 S3_REGION = os.environ.get('AWS_DEFAULT_REGION', 'us-east-1')
 
-# Hardcoded Admins (only these can add/delete)
 HARDCODED_ADMINS = ['alemaga', 'soemilio', 'gregonz']
 
 DATASETS = {
@@ -39,36 +37,27 @@ def get_s3_client():
     return boto3.client('s3', region_name=S3_REGION, config=config)
 
 def load_registered_editors():
-    """Load registered editors from S3"""
     try:
         s3 = get_s3_client()
         response = s3.get_object(Bucket=S3_BUCKET, Key='config/editors.json')
         data = json.loads(response['Body'].read().decode('utf-8'))
         return data.get('editors', [])
-    except Exception as e:
-        print(f"Error loading editors: {e}")
+    except:
         return []
 
 def save_registered_editors(editors):
-    """Save registered editors to S3"""
     try:
         s3 = get_s3_client()
-        data = {
-            "editors": editors,
-            "updated": datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        }
-        s3.put_object(Bucket=S3_BUCKET, Key='config/editors.json', 
-                      Body=json.dumps(data, indent=2), ContentType='application/json')
+        data = {"editors": editors, "updated": datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+        s3.put_object(Bucket=S3_BUCKET, Key='config/editors.json', Body=json.dumps(data, indent=2), ContentType='application/json')
         return True
-    except Exception as e:
-        print(f"Error saving editors: {e}")
+    except:
         return False
 
 def load_from_s3(folder):
     try:
         s3 = get_s3_client()
-        key = f"{folder}/data.csv"
-        response = s3.get_object(Bucket=S3_BUCKET, Key=key)
+        response = s3.get_object(Bucket=S3_BUCKET, Key=f"{folder}/data.csv")
         df = pd.read_csv(StringIO(response['Body'].read().decode('utf-8')))
         df = df.fillna('')
         for col in df.columns:
@@ -80,10 +69,9 @@ def load_from_s3(folder):
 def save_to_s3(folder, df):
     try:
         s3 = get_s3_client()
-        key = f"{folder}/data.csv"
         csv_buffer = StringIO()
         df.to_csv(csv_buffer, index=False)
-        s3.put_object(Bucket=S3_BUCKET, Key=key, Body=csv_buffer.getvalue(), ContentType='text/csv')
+        s3.put_object(Bucket=S3_BUCKET, Key=f"{folder}/data.csv", Body=csv_buffer.getvalue(), ContentType='text/csv')
         return True
     except Exception as e:
         return str(e)
@@ -98,38 +86,88 @@ def is_editor():
         return False
     if user in [a.lower() for a in HARDCODED_ADMINS]:
         return True
-    editors = load_registered_editors()
-    return user in [e.lower() for e in editors]
+    return user in [e.lower() for e in load_registered_editors()]
 
 def login_required_editor(f):
     @wraps(f)
-    def decorated_function(*args, **kwargs):
+    def decorated(*args, **kwargs):
         if not is_editor():
             return jsonify({'success': False, 'error': 'Editor access required', 'needsLogin': True}), 401
         return f(*args, **kwargs)
-    return decorated_function
+    return decorated
 
 def login_required_admin(f):
     @wraps(f)
-    def decorated_function(*args, **kwargs):
+    def decorated(*args, **kwargs):
         if not is_admin():
             return jsonify({'success': False, 'error': 'Admin access required', 'needsLogin': True}), 401
         return f(*args, **kwargs)
-    return decorated_function
+    return decorated
 
-def parse_date_to_input(date_str):
-    """Convert date string to YYYY-MM-DD format for HTML date input"""
+def parse_date_for_input(date_str):
     if not date_str or date_str == 'nan' or str(date_str).strip() == '':
         return ''
     date_str = str(date_str).strip()
-    # Try MM/DD/YYYY format
     match = re.match(r'^(\d{1,2})/(\d{1,2})/(\d{4})$', date_str)
     if match:
         return f"{match.group(3)}-{match.group(1).zfill(2)}-{match.group(2).zfill(2)}"
-    # Try YYYY-MM-DD format (already correct)
     if re.match(r'^\d{4}-\d{2}-\d{2}$', date_str):
         return date_str
     return ''
+
+def build_table_html(rows, columns, active, user_is_editor, user_is_admin, statuses, rag_statuses):
+    """Build table HTML with inline editing controls"""
+    html = '<table><thead><tr>'
+    if user_is_editor:
+        html += '<th>Actions</th>'
+    for c in columns:
+        html += f'<th>{c}</th>'
+    html += '</tr></thead><tbody>'
+    
+    for row_idx, row in enumerate(rows):
+        html += f'<tr data-index="{row_idx}">'
+        if user_is_editor:
+            html += f'<td><button class="edit-btn" onclick="openEditModal({row_idx})">Edit</button>'
+            if user_is_admin:
+                html += f'<button class="delete-btn" onclick="confirmDelete({row_idx})">✕</button>'
+            html += '</td>'
+        
+        for c in columns:
+            col_val = row.get(c, '') or ''
+            
+            if active == 'action-plan' and c == 'ETA' and user_is_editor:
+                date_val = parse_date_for_input(col_val)
+                html += f'<td><input type="date" class="inline-date" data-row="{row_idx}" data-col="ETA" value="{date_val}" onchange="inlineUpdate(this)"></td>'
+            elif active == 'action-plan' and c == 'Status' and user_is_editor:
+                html += f'<td><select class="inline-select" data-row="{row_idx}" data-col="Status" onchange="inlineUpdate(this)">'
+                for s in statuses:
+                    sel = 'selected' if col_val == s else ''
+                    html += f'<option value="{s}" {sel}>{s}</option>'
+                html += '</select></td>'
+            elif active == 'action-plan' and c == 'RAG Status' and user_is_editor:
+                html += f'<td><select class="inline-select" data-row="{row_idx}" data-col="RAG Status" onchange="inlineUpdate(this)">'
+                for r in rag_statuses:
+                    sel = 'selected' if col_val == r else ''
+                    html += f'<option value="{r}" {sel}>{r}</option>'
+                html += '</select></td>'
+            elif c == 'Status':
+                css_class = col_val.lower().replace(' ', '')
+                html += f'<td><span class="status-{css_class}">{col_val}</span></td>'
+            elif c == 'RAG Status':
+                css_class = col_val.lower()
+                html += f'<td><span class="rag-{css_class}">{col_val}</span></td>'
+            elif c == 'Priority':
+                css_class = col_val.lower()
+                html += f'<td><span class="priority-{css_class}">{col_val}</span></td>'
+            elif c in ['Owner', 'Stakeholder', 'Alias', 'POC'] and col_val:
+                html += f'<td><a href="https://phonetool.amazon.com/users/{col_val}" target="_blank" class="owner-link">{col_val}</a></td>'
+            else:
+                html += f'<td>{col_val}</td>'
+        
+        html += '</tr>'
+    
+    html += '</tbody></table>'
+    return html
 
 HTML = '''
 <!DOCTYPE html>
@@ -144,7 +182,7 @@ HTML = '''
         .header-left p { margin: 5px 0 0; opacity: 0.8; font-size: 14px; }
         .header-right { display: flex; align-items: center; gap: 15px; }
         .user-info { color: white; font-size: 14px; }
-        .user-role { background: #0070c0; padding: 2px 8px; border-radius: 3px; font-size: 11px; margin-left: 5px; }
+        .user-role { padding: 2px 8px; border-radius: 3px; font-size: 11px; margin-left: 5px; }
         .user-role.admin { background: #28a745; }
         .user-role.editor { background: #ffc107; color: #333; }
         .login-btn, .logout-btn { background: #0070c0; color: white; border: none; padding: 8px 16px; border-radius: 5px; cursor: pointer; text-decoration: none; font-size: 14px; }
@@ -200,21 +238,17 @@ HTML = '''
         .form-group label { display: block; margin-bottom: 5px; font-weight: 600; color: #333; }
         .form-group input, .form-group select, .form-group textarea { width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 6px; font-size: 14px; }
         .form-group textarea { min-height: 60px; resize: vertical; }
-        .form-row { display: flex; gap: 15px; }
-        .form-row .form-group { flex: 1; }
         .save-btn { background: #003366; color: white; border: none; padding: 12px 30px; border-radius: 6px; cursor: pointer; font-size: 16px; width: 100%; margin-top: 10px; }
         .save-btn:hover { background: #004488; }
-        .save-btn:disabled { background: #ccc; cursor: not-allowed; }
+        .save-btn:disabled { background: #ccc; }
         .success-msg { background: #d4edda; color: #155724; padding: 10px; border-radius: 6px; margin-bottom: 15px; display: none; }
         .error-msg { background: #f8d7da; color: #721c24; padding: 10px; border-radius: 6px; margin-bottom: 15px; display: none; }
         .alias-wrapper { position: relative; }
         .alias-input { padding-right: 80px !important; }
         .lookup-btn { position: absolute; right: 5px; top: 50%; transform: translateY(-50%); background: #0070c0; color: white; border: none; padding: 5px 10px; border-radius: 4px; cursor: pointer; font-size: 12px; }
-        .lookup-btn:hover { background: #005a9e; }
         .read-only-notice { background: #fff3cd; color: #856404; padding: 10px 15px; border-radius: 6px; margin-bottom: 15px; font-size: 14px; }
         .editor-notice { background: #d1ecf1; color: #0c5460; padding: 10px 15px; border-radius: 6px; margin-bottom: 15px; font-size: 14px; }
         .link-btn { background: none; border: none; color: #0070c0; cursor: pointer; text-decoration: underline; font-size: 14px; }
-        .link-btn:hover { color: #005a9e; }
         .signup-success { background: #d4edda; color: #155724; padding: 15px; border-radius: 6px; margin-bottom: 15px; text-align: center; }
     </style>
 </head>
@@ -226,13 +260,9 @@ HTML = '''
         </div>
         <div class="header-right">
             {% if user %}
-            <span class="user-info">
-                👤 {{ user }}
-                {% if user_is_admin %}
-                <span class="user-role admin">Admin</span>
-                {% elif user_is_editor %}
-                <span class="user-role editor">Editor</span>
-                {% endif %}
+            <span class="user-info">👤 {{ user }}
+                {% if user_is_admin %}<span class="user-role admin">Admin</span>
+                {% elif user_is_editor %}<span class="user-role editor">Editor</span>{% endif %}
             </span>
             <a href="/logout" class="logout-btn">Logout</a>
             {% else %}
@@ -262,155 +292,64 @@ HTML = '''
             <div class="btn-group">
                 <a href="/export/{{ active }}/excel" class="export-btn">📥 Excel</a>
                 <a href="/export/{{ active }}/csv" class="export-btn">📥 CSV</a>
-                {% if user_is_admin %}
-                <button class="add-btn" onclick="openAddModal()">+ Add New</button>
-                {% endif %}
+                {% if user_is_admin %}<button class="add-btn" onclick="openAddModal()">+ Add New</button>{% endif %}
             </div>
         </div>
         
         {% if not user %}
-        <div class="read-only-notice">
-            🔒 <strong>View Only</strong> - <a href="#" onclick="openLoginModal(); return false;">Login</a> or <a href="#" onclick="openSignupModal(); return false;">Sign up</a> to edit items.
-        </div>
+        <div class="read-only-notice">🔒 <strong>View Only</strong> - <a href="#" onclick="openLoginModal(); return false;">Login</a> or <a href="#" onclick="openSignupModal(); return false;">Sign up</a> to edit.</div>
         {% elif user_is_editor and not user_is_admin %}
-        <div class="editor-notice">
-            ✏️ <strong>Editor Mode</strong> - You can edit existing items using the inline dropdowns or Edit button.
-        </div>
+        <div class="editor-notice">✏️ <strong>Editor Mode</strong> - Edit items using inline dropdowns or Edit button.</div>
         {% endif %}
         
         {% if error %}
         <div class="error">{{ error }}</div>
         {% else %}
-        <div style="overflow-x:auto;">
-        <table>
-            <thead>
-                <tr>
-                    {% if user_is_editor %}<th>Actions</th>{% endif %}
-                    {% for c in columns %}<th>{{ c }}</th>{% endfor %}
-                </tr>
-            </thead>
-            <tbody>
-            {% for row in rows %}
-                <tr data-index="{{ loop.index0 }}">
-                    {% if user_is_editor %}
-                    <td>
-                        <button class="edit-btn" onclick="openEditModal({{ loop.index0 }})">Edit</button>
-                        {% if user_is_admin %}
-                        <button class="delete-btn" onclick="confirmDelete({{ loop.index0 }})">✕</button>
-                        {% endif %}
-                    </td>
-                    {% endif %}
-                    {% for c in columns %}
-                    <td>
-                        {% set row_idx = loop.parent.loop.index0 %}
-                        {% set col_val = row.get(c, '') %}
-                        {% if active == 'action-plan' and c == 'ETA' and user_is_editor %}
-                            <input type="date" class="inline-date" 
-                                   data-row="{{ row_idx }}" data-col="ETA"
-                                   value="{{ col_val|parse_date_filter }}" 
-                                   onchange="inlineUpdate(this)">
-                        {% elif active == 'action-plan' and c == 'Status' and user_is_editor %}
-                            <select class="inline-select" data-row="{{ row_idx }}" data-col="Status" onchange="inlineUpdate(this)">
-                                {% for s in statuses %}
-                                <option value="{{ s }}" {{ 'selected' if col_val == s else '' }}>{{ s }}</option>
-                                {% endfor %}
-                            </select>
-                        {% elif active == 'action-plan' and c == 'RAG Status' and user_is_editor %}
-                            <select class="inline-select" data-row="{{ row_idx }}" data-col="RAG Status" onchange="inlineUpdate(this)">
-                                {% for r in rag_statuses %}
-                                <option value="{{ r }}" {{ 'selected' if col_val == r else '' }}>{{ r }}</option>
-                                {% endfor %}
-                            </select>
-                        {% elif c == 'Status' %}
-                            <span class="status-{{ col_val|lower|replace(' ', '') }}">{{ col_val }}</span>
-                        {% elif c == 'RAG Status' %}
-                            <span class="rag-{{ col_val|lower }}">{{ col_val }}</span>
-                        {% elif c == 'Priority' %}
-                            <span class="priority-{{ col_val|lower }}">{{ col_val }}</span>
-                        {% elif (c == 'Owner' or c == 'Stakeholder' or c == 'Alias' or c == 'POC') and col_val %}
-                            <a href="https://phonetool.amazon.com/users/{{ col_val }}" target="_blank" class="owner-link">{{ col_val }}</a>
-                        {% else %}
-                            {{ col_val }}
-                        {% endif %}
-                    </td>
-                    {% endfor %}
-                </tr>
-            {% endfor %}
-            </tbody>
-        </table>
-        </div>
+        <div style="overflow-x:auto;">{{ table_html | safe }}</div>
         {% endif %}
     </div>
     
-    <!-- Login Modal -->
     <div id="loginModal" class="modal">
         <div class="modal-content" style="max-width: 400px;">
-            <div class="modal-header">
-                <h2>Login</h2>
-                <button class="close-btn" onclick="closeModal('loginModal')">&times;</button>
-            </div>
+            <div class="modal-header"><h2>Login</h2><button class="close-btn" onclick="closeModal('loginModal')">&times;</button></div>
             <div id="loginErrorMsg" class="error-msg"></div>
             <form id="loginForm">
-                <div class="form-group">
-                    <label>Amazon Alias</label>
-                    <input type="text" id="loginAlias" name="alias" placeholder="Enter your Amazon alias" required>
-                </div>
+                <div class="form-group"><label>Amazon Alias</label><input type="text" id="loginAlias" placeholder="Enter your Amazon alias" required></div>
                 <button type="submit" class="save-btn">Login</button>
             </form>
-            <p style="text-align: center; margin-top: 15px;">
-                New user? <button type="button" class="link-btn" onclick="closeModal('loginModal'); openSignupModal();">Sign up as Editor</button>
-            </p>
+            <p style="text-align: center; margin-top: 15px;">New user? <button type="button" class="link-btn" onclick="closeModal('loginModal'); openSignupModal();">Sign up as Editor</button></p>
         </div>
     </div>
     
-    <!-- Signup Modal -->
     <div id="signupModal" class="modal">
         <div class="modal-content" style="max-width: 400px;">
-            <div class="modal-header">
-                <h2>Sign Up as Editor</h2>
-                <button class="close-btn" onclick="closeModal('signupModal')">&times;</button>
-            </div>
+            <div class="modal-header"><h2>Sign Up as Editor</h2><button class="close-btn" onclick="closeModal('signupModal')">&times;</button></div>
             <div id="signupSuccessMsg" class="signup-success" style="display: none;"></div>
             <div id="signupErrorMsg" class="error-msg"></div>
             <form id="signupForm">
-                <div class="form-group">
-                    <label>Amazon Alias</label>
-                    <input type="text" id="signupAlias" name="alias" placeholder="Enter your Amazon alias" required>
-                </div>
-                <p style="font-size: 12px; color: #666;">
-                    As an Editor, you can edit existing items across all sections.
-                    Only Admins can add or delete items.
-                </p>
+                <div class="form-group"><label>Amazon Alias</label><input type="text" id="signupAlias" placeholder="Enter your Amazon alias" required></div>
+                <p style="font-size: 12px; color: #666;">As an Editor, you can edit existing items. Only Admins can add or delete.</p>
                 <button type="submit" class="save-btn">Register as Editor</button>
             </form>
-            <p style="text-align: center; margin-top: 15px;">
-                Already registered? <button type="button" class="link-btn" onclick="closeModal('signupModal'); openLoginModal();">Login</button>
-            </p>
+            <p style="text-align: center; margin-top: 15px;">Already registered? <button type="button" class="link-btn" onclick="closeModal('signupModal'); openLoginModal();">Login</button></p>
         </div>
     </div>
     
-    <!-- Edit Modal -->
     <div id="editModal" class="modal">
         <div class="modal-content">
-            <div class="modal-header">
-                <h2 id="modalTitle">Edit Item</h2>
-                <button class="close-btn" onclick="closeModal('editModal')">&times;</button>
-            </div>
-            <div id="successMsg" class="success-msg">Changes saved successfully!</div>
+            <div class="modal-header"><h2 id="modalTitle">Edit Item</h2><button class="close-btn" onclick="closeModal('editModal')">&times;</button></div>
+            <div id="successMsg" class="success-msg">Saved successfully!</div>
             <div id="errorMsg" class="error-msg"></div>
             <form id="editForm">
-                <input type="hidden" id="rowIndex" name="rowIndex" value="-1">
-                <input type="hidden" id="dataset" name="dataset" value="{{ active }}">
-                <input type="hidden" id="isNew" name="isNew" value="false">
+                <input type="hidden" id="rowIndex" value="-1">
+                <input type="hidden" id="isNew" value="false">
                 <div id="formFields"></div>
                 <button type="submit" class="save-btn" id="saveBtn">Save Changes</button>
             </form>
         </div>
     </div>
     
-    <p style="color: #999; text-align: center; margin-top: 30px;">
-        MX Customs E-File Compliance Tracker | GTS LATAM | <a href="/health">Health</a>
-    </p>
+    <p style="color: #999; text-align: center; margin-top: 30px;">MX Customs E-File Compliance Tracker | GTS LATAM</p>
     
     <script>
         const rowData = {{ rows_json | safe }};
@@ -418,7 +357,6 @@ HTML = '''
         const currentDataset = "{{ active }}";
         const userIsEditor = {{ 'true' if user_is_editor else 'false' }};
         const userIsAdmin = {{ 'true' if user_is_admin else 'false' }};
-        
         const teams = {{ teams_json | safe }};
         const phases = {{ phases_json | safe }};
         const workstreams = {{ workstreams_json | safe }};
@@ -450,31 +388,25 @@ HTML = '''
                 {name: 'Communication', type: 'select', options: ['Email', 'Chime', 'Meetings', 'Slack']},
                 {name: 'Responsibilities', type: 'textarea'},
                 {name: 'Notes', type: 'textarea'}
-            ],
-            'default': []
+            ]
         };
         
-        function parseDate(dateStr) {
-            if (!dateStr || dateStr === 'nan' || dateStr === '') return '';
-            const match = dateStr.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
-            if (match) return match[3] + '-' + match[1].padStart(2, '0') + '-' + match[2].padStart(2, '0');
-            if (/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return dateStr;
-            return '';
+        function parseDate(d) {
+            if (!d || d === 'nan') return '';
+            const m = d.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+            if (m) return m[3]+'-'+m[1].padStart(2,'0')+'-'+m[2].padStart(2,'0');
+            return /^\d{4}-\d{2}-\d{2}$/.test(d) ? d : '';
         }
-        
-        function formatDateForSave(dateStr) {
-            if (!dateStr) return '';
-            const parts = dateStr.split('-');
-            return parts.length === 3 ? parts[1] + '/' + parts[2] + '/' + parts[0] : dateStr;
+        function formatDate(d) {
+            if (!d) return '';
+            const p = d.split('-');
+            return p.length === 3 ? p[1]+'/'+p[2]+'/'+p[0] : d;
         }
-        
-        function lookupAlias(fieldId) {
-            const alias = document.getElementById(fieldId).value.trim();
-            if (!alias) { alert('Please enter an alias'); return; }
-            window.open('https://phonetool.amazon.com/users/' + alias, '_blank');
+        function lookupAlias(id) {
+            const a = document.getElementById(id).value.trim();
+            if (a) window.open('https://phonetool.amazon.com/users/'+a, '_blank');
         }
-        
-        function closeModal(modalId) { document.getElementById(modalId).classList.remove('active'); }
+        function closeModal(id) { document.getElementById(id).classList.remove('active'); }
         function openLoginModal() {
             document.getElementById('loginErrorMsg').style.display = 'none';
             document.getElementById('loginAlias').value = '';
@@ -490,243 +422,128 @@ HTML = '''
         
         async function inlineUpdate(el) {
             if (!userIsEditor) { openLoginModal(); return; }
-            
-            const rowIndex = parseInt(el.dataset.row);
-            const column = el.dataset.col;
-            let value = el.value;
-            
-            if (el.type === 'date' && value) {
-                value = formatDateForSave(value);
-            }
-            
             const row = el.closest('tr');
             row.classList.add('saving');
-            
+            let val = el.value;
+            if (el.type === 'date' && val) val = formatDate(val);
             try {
-                const response = await fetch('/api/inline-update', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ dataset: currentDataset, rowIndex: rowIndex, column: column, value: value })
+                const res = await fetch('/api/inline-update', {
+                    method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({dataset: currentDataset, rowIndex: parseInt(el.dataset.row), column: el.dataset.col, value: val})
                 });
-                const result = await response.json();
+                const r = await res.json();
                 row.classList.remove('saving');
-                
-                if (result.needsLogin) { openLoginModal(); return; }
-                if (!result.success) {
-                    alert('Failed to save: ' + (result.error || 'Unknown error'));
-                    location.reload();
-                }
-            } catch (err) {
-                row.classList.remove('saving');
-                alert('Network error: ' + err.message);
-            }
+                if (r.needsLogin) openLoginModal();
+                else if (!r.success) { alert('Error: '+(r.error||'Unknown')); location.reload(); }
+            } catch(e) { row.classList.remove('saving'); alert('Network error'); }
         }
         
-        function getFieldConfig() {
-            return datasetFields[currentDataset] || datasetFields['default'] || columns.map(c => ({name: c, type: 'text'}));
-        }
+        function getFields() { return datasetFields[currentDataset] || columns.map(c=>({name:c,type:'text'})); }
         
-        function buildFormFields(row, isNew) {
-            const fields = getFieldConfig();
-            if (fields.length === 0) {
-                return columns.map((col, idx) => {
-                    const val = row ? (row[col] || '') : '';
-                    return '<div class="form-group"><label>' + col + '</label><input type="text" id="field_' + idx + '" name="' + col + '" value="' + val + '"></div>';
-                }).join('');
-            }
-            
-            return fields.map((field, idx) => {
-                const value = row ? (row[field.name] || '') : '';
-                const fieldId = 'field_' + idx;
-                const req = field.required ? 'required' : '';
-                let html = '<div class="form-group"><label>' + field.name + (field.required ? ' *' : '') + '</label>';
-                
-                if (field.type === 'select') {
-                    html += '<select id="' + fieldId + '" name="' + field.name + '" ' + req + '>';
-                    (field.options || []).forEach(opt => {
-                        const sel = value === opt ? 'selected' : '';
-                        html += '<option value="' + opt + '" ' + sel + '>' + (opt || '-- Select --') + '</option>';
-                    });
-                    html += '</select>';
-                } else if (field.type === 'textarea') {
-                    html += '<textarea id="' + fieldId + '" name="' + field.name + '" ' + req + '>' + value + '</textarea>';
-                } else if (field.type === 'date') {
-                    html += '<input type="date" id="' + fieldId + '" name="' + field.name + '" value="' + parseDate(value) + '" ' + req + '>';
-                } else if (field.type === 'alias') {
-                    html += '<div class="alias-wrapper"><input type="text" id="' + fieldId + '" name="' + field.name + '" value="' + value + '" class="alias-input" placeholder="Amazon alias" ' + req + '>';
-                    html += '<button type="button" class="lookup-btn" onclick="lookupAlias(\'' + fieldId + '\')">Lookup</button></div>';
+        function buildForm(row, isNew) {
+            const fields = getFields();
+            return fields.map((f,i) => {
+                const v = row ? (row[f.name]||'') : '';
+                const id = 'field_'+i;
+                let h = '<div class="form-group"><label>'+f.name+(f.required?' *':'')+'</label>';
+                if (f.type === 'select') {
+                    h += '<select id="'+id+'" name="'+f.name+'">'+(f.options||[]).map(o=>'<option value="'+o+'"'+(v===o?' selected':'')+'>'+( o||'-- Select --')+'</option>').join('')+'</select>';
+                } else if (f.type === 'textarea') {
+                    h += '<textarea id="'+id+'" name="'+f.name+'">'+v+'</textarea>';
+                } else if (f.type === 'date') {
+                    h += '<input type="date" id="'+id+'" name="'+f.name+'" value="'+parseDate(v)+'">';
+                } else if (f.type === 'alias') {
+                    h += '<div class="alias-wrapper"><input type="text" id="'+id+'" name="'+f.name+'" value="'+v+'" class="alias-input" placeholder="Amazon alias"><button type="button" class="lookup-btn" onclick="lookupAlias(\''+id+'\')">Lookup</button></div>';
                 } else {
-                    html += '<input type="text" id="' + fieldId + '" name="' + field.name + '" value="' + value + '" ' + req + '>';
+                    h += '<input type="text" id="'+id+'" name="'+f.name+'" value="'+v+'"'+(f.required?' required':'')+'>';
                 }
-                html += '</div>';
-                return html;
+                return h + '</div>';
             }).join('');
         }
         
         function openAddModal() {
-            if (!userIsAdmin) { alert('Admin access required to add items'); return; }
+            if (!userIsAdmin) { alert('Admin access required'); return; }
             document.getElementById('modalTitle').textContent = 'Add New Item';
             document.getElementById('isNew').value = 'true';
             document.getElementById('rowIndex').value = '-1';
-            document.getElementById('formFields').innerHTML = buildFormFields(null, true);
-            
+            document.getElementById('formFields').innerHTML = buildForm(null, true);
             if (currentDataset === 'action-plan') {
-                let maxNum = 0;
-                rowData.forEach(row => { 
-                    const match = (row['Action ID'] || '').match(/AP-(\d+)/); 
-                    if (match) maxNum = Math.max(maxNum, parseInt(match[1])); 
-                });
-                const idField = document.querySelector('[name="Action ID"]');
-                if (idField) idField.value = 'AP-' + String(maxNum + 1).padStart(3, '0');
+                let max = 0;
+                rowData.forEach(r => { const m = (r['Action ID']||'').match(/AP-(\d+)/); if(m) max = Math.max(max, parseInt(m[1])); });
+                const f = document.querySelector('[name="Action ID"]');
+                if (f) f.value = 'AP-'+String(max+1).padStart(3,'0');
             }
-            
             document.getElementById('successMsg').style.display = 'none';
             document.getElementById('errorMsg').style.display = 'none';
             document.getElementById('editModal').classList.add('active');
         }
         
-        function openEditModal(index) {
+        function openEditModal(idx) {
             if (!userIsEditor) { openLoginModal(); return; }
             document.getElementById('modalTitle').textContent = 'Edit Item';
             document.getElementById('isNew').value = 'false';
-            document.getElementById('rowIndex').value = index;
-            document.getElementById('formFields').innerHTML = buildFormFields(rowData[index], false);
+            document.getElementById('rowIndex').value = idx;
+            document.getElementById('formFields').innerHTML = buildForm(rowData[idx], false);
             document.getElementById('successMsg').style.display = 'none';
             document.getElementById('errorMsg').style.display = 'none';
             document.getElementById('editModal').classList.add('active');
         }
         
-        function confirmDelete(index) {
-            if (!userIsAdmin) { alert('Admin access required to delete items'); return; }
-            const row = rowData[index];
-            const itemName = row['Action ID'] || row['Team'] || row[columns[0]] || ('Item ' + (index + 1));
-            if (confirm('Are you sure you want to delete "' + itemName + '"?')) deleteItem(index);
+        function confirmDelete(idx) {
+            if (!userIsAdmin) { alert('Admin access required'); return; }
+            const name = rowData[idx]['Action ID'] || rowData[idx]['Team'] || 'Item '+(idx+1);
+            if (confirm('Delete "'+name+'"?')) deleteItem(idx);
         }
         
-        async function deleteItem(index) {
-            try {
-                const response = await fetch('/api/delete', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ dataset: currentDataset, rowIndex: index })
-                });
-                const result = await response.json();
-                if (result.needsLogin) { openLoginModal(); return; }
-                if (result.success) location.reload();
-                else alert('Failed to delete: ' + (result.error || 'Unknown error'));
-            } catch (err) { alert('Network error: ' + err.message); }
+        async function deleteItem(idx) {
+            const res = await fetch('/api/delete', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({dataset:currentDataset,rowIndex:idx})});
+            const r = await res.json();
+            if (r.success) location.reload(); else alert('Error: '+(r.error||'Unknown'));
         }
         
-        document.querySelectorAll('.modal').forEach(modal => {
-            modal.addEventListener('click', function(e) { if (e.target === this) closeModal(this.id); });
-        });
+        document.querySelectorAll('.modal').forEach(m => m.addEventListener('click', e => { if(e.target===m) closeModal(m.id); }));
         
-        document.getElementById('loginForm').addEventListener('submit', async function(e) {
+        document.getElementById('loginForm').addEventListener('submit', async e => {
             e.preventDefault();
-            const alias = document.getElementById('loginAlias').value.trim().toLowerCase();
-            try {
-                const response = await fetch('/api/login', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ alias: alias })
-                });
-                const result = await response.json();
-                if (result.success) location.reload();
-                else {
-                    document.getElementById('loginErrorMsg').textContent = result.error || 'Login failed';
-                    document.getElementById('loginErrorMsg').style.display = 'block';
-                }
-            } catch (err) {
-                document.getElementById('loginErrorMsg').textContent = 'Network error';
-                document.getElementById('loginErrorMsg').style.display = 'block';
-            }
+            const res = await fetch('/api/login', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({alias:document.getElementById('loginAlias').value.trim().toLowerCase()})});
+            const r = await res.json();
+            if (r.success) location.reload();
+            else { document.getElementById('loginErrorMsg').textContent = r.error||'Failed'; document.getElementById('loginErrorMsg').style.display = 'block'; }
         });
         
-        document.getElementById('signupForm').addEventListener('submit', async function(e) {
+        document.getElementById('signupForm').addEventListener('submit', async e => {
             e.preventDefault();
             const alias = document.getElementById('signupAlias').value.trim().toLowerCase();
-            try {
-                const response = await fetch('/api/signup', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ alias: alias })
-                });
-                const result = await response.json();
-                if (result.success) {
-                    document.getElementById('signupSuccessMsg').innerHTML = '✓ Welcome, <strong>' + alias + '</strong>! You are now registered as an Editor.';
-                    document.getElementById('signupSuccessMsg').style.display = 'block';
-                    document.getElementById('signupForm').style.display = 'none';
-                    setTimeout(function() { location.reload(); }, 1500);
-                } else {
-                    document.getElementById('signupErrorMsg').textContent = result.error || 'Registration failed';
-                    document.getElementById('signupErrorMsg').style.display = 'block';
-                }
-            } catch (err) {
-                document.getElementById('signupErrorMsg').textContent = 'Network error';
-                document.getElementById('signupErrorMsg').style.display = 'block';
-            }
+            const res = await fetch('/api/signup', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({alias})});
+            const r = await res.json();
+            if (r.success) {
+                document.getElementById('signupSuccessMsg').innerHTML = '✓ Welcome, <b>'+alias+'</b>! You are now an Editor.';
+                document.getElementById('signupSuccessMsg').style.display = 'block';
+                document.getElementById('signupForm').style.display = 'none';
+                setTimeout(() => location.reload(), 1500);
+            } else { document.getElementById('signupErrorMsg').textContent = r.error||'Failed'; document.getElementById('signupErrorMsg').style.display = 'block'; }
         });
         
-        document.getElementById('editForm').addEventListener('submit', async function(e) {
+        document.getElementById('editForm').addEventListener('submit', async e => {
             e.preventDefault();
-            const saveBtn = document.getElementById('saveBtn');
-            saveBtn.disabled = true;
-            saveBtn.textContent = 'Saving...';
-            
-            const fields = getFieldConfig();
-            const formData = {
-                dataset: currentDataset,
-                rowIndex: parseInt(document.getElementById('rowIndex').value),
-                isNew: document.getElementById('isNew').value === 'true',
-                fields: {}
-            };
-            
-            if (fields.length === 0) {
-                columns.forEach((col, idx) => {
-                    const el = document.getElementById('field_' + idx);
-                    if (el) formData.fields[col] = el.value;
-                });
-            } else {
-                fields.forEach((field, idx) => {
-                    const el = document.getElementById('field_' + idx);
-                    if (el) {
-                        let val = el.value;
-                        if (field.type === 'date' && val) val = formatDateForSave(val);
-                        formData.fields[field.name] = val;
-                    }
-                });
-            }
-            
-            try {
-                const response = await fetch('/api/update-generic', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(formData)
-                });
-                const result = await response.json();
-                if (result.needsLogin) { openLoginModal(); saveBtn.disabled = false; saveBtn.textContent = 'Save Changes'; return; }
-                if (result.success) {
-                    document.getElementById('successMsg').style.display = 'block';
-                    setTimeout(function() { closeModal('editModal'); location.reload(); }, 1000);
-                } else {
-                    document.getElementById('errorMsg').textContent = result.error || 'Failed to save';
-                    document.getElementById('errorMsg').style.display = 'block';
-                }
-            } catch (err) {
-                document.getElementById('errorMsg').textContent = 'Network error: ' + err.message;
-                document.getElementById('errorMsg').style.display = 'block';
-            }
-            saveBtn.disabled = false;
-            saveBtn.textContent = 'Save Changes';
+            const btn = document.getElementById('saveBtn');
+            btn.disabled = true; btn.textContent = 'Saving...';
+            const fields = getFields();
+            const data = {dataset:currentDataset, rowIndex:parseInt(document.getElementById('rowIndex').value), isNew:document.getElementById('isNew').value==='true', fields:{}};
+            fields.forEach((f,i) => {
+                const el = document.getElementById('field_'+i);
+                if (el) { let v = el.value; if(f.type==='date'&&v) v = formatDate(v); data.fields[f.name] = v; }
+            });
+            const res = await fetch('/api/update-generic', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(data)});
+            const r = await res.json();
+            btn.disabled = false; btn.textContent = 'Save Changes';
+            if (r.success) { document.getElementById('successMsg').style.display = 'block'; setTimeout(() => location.reload(), 1000); }
+            else { document.getElementById('errorMsg').textContent = r.error||'Failed'; document.getElementById('errorMsg').style.display = 'block'; }
         });
     </script>
 </body>
 </html>
 '''
-
-@app.template_filter('parse_date_filter')
-def parse_date_filter(date_str):
-    return parse_date_to_input(date_str)
 
 @app.route('/')
 def home():
@@ -737,97 +554,79 @@ def view_dataset(dataset):
     if dataset not in DATASETS:
         return "Not found", 404
     
-    try:
-        result = load_from_s3(dataset)
-        user = session.get('user')
-        user_is_admin = is_admin()
-        user_is_editor = is_editor()
-        
-        if isinstance(result, str):
-            return render_template_string(HTML, 
-                datasets=DATASETS, active=dataset, title=DATASETS[dataset], 
-                error=result, columns=[], rows=[],
-                rows_json='[]', columns_json='[]',
-                teams_json=json.dumps(TEAMS), phases_json=json.dumps(PHASES),
-                workstreams_json=json.dumps(WORKSTREAMS), statuses_json=json.dumps(STATUSES),
-                rag_statuses_json=json.dumps(RAG_STATUSES), statuses=STATUSES, rag_statuses=RAG_STATUSES,
-                stats=None, user=user, user_is_admin=user_is_admin, user_is_editor=user_is_editor)
-        
-        df = result
-        stats = None
-        if dataset == 'action-plan' and 'Status' in df.columns:
-            stats = {
-                'total': len(df),
-                'active': len(df[df['Status'] == 'Active']),
-                'progress': len(df[df['Status'] == 'In Progress']),
-                'planned': len(df[df['Status'] == 'Planned'])
-            }
-        
-        rows = df.to_dict('records')
-        columns = df.columns.tolist()
-        
-        return render_template_string(HTML,
-            datasets=DATASETS, active=dataset, title=DATASETS[dataset],
-            error=None, columns=columns, rows=rows,
-            rows_json=json.dumps(rows), columns_json=json.dumps(columns),
+    result = load_from_s3(dataset)
+    user = session.get('user')
+    user_is_admin = is_admin()
+    user_is_editor = is_editor()
+    
+    if isinstance(result, str):
+        return render_template_string(HTML, 
+            datasets=DATASETS, active=dataset, title=DATASETS[dataset], 
+            error=result, table_html='', rows_json='[]', columns_json='[]',
             teams_json=json.dumps(TEAMS), phases_json=json.dumps(PHASES),
             workstreams_json=json.dumps(WORKSTREAMS), statuses_json=json.dumps(STATUSES),
-            rag_statuses_json=json.dumps(RAG_STATUSES), statuses=STATUSES, rag_statuses=RAG_STATUSES,
-            stats=stats, user=user, user_is_admin=user_is_admin, user_is_editor=user_is_editor)
-    except Exception as e:
-        return f"Error: {str(e)}", 500
+            rag_statuses_json=json.dumps(RAG_STATUSES),
+            stats=None, user=user, user_is_admin=user_is_admin, user_is_editor=user_is_editor)
+    
+    df = result
+    rows = df.to_dict('records')
+    columns = df.columns.tolist()
+    
+    stats = None
+    if dataset == 'action-plan' and 'Status' in df.columns:
+        stats = {
+            'total': len(df),
+            'active': len(df[df['Status'] == 'Active']),
+            'progress': len(df[df['Status'] == 'In Progress']),
+            'planned': len(df[df['Status'] == 'Planned'])
+        }
+    
+    table_html = build_table_html(rows, columns, dataset, user_is_editor, user_is_admin, STATUSES, RAG_STATUSES)
+    
+    return render_template_string(HTML,
+        datasets=DATASETS, active=dataset, title=DATASETS[dataset],
+        error=None, table_html=table_html,
+        rows_json=json.dumps(rows), columns_json=json.dumps(columns),
+        teams_json=json.dumps(TEAMS), phases_json=json.dumps(PHASES),
+        workstreams_json=json.dumps(WORKSTREAMS), statuses_json=json.dumps(STATUSES),
+        rag_statuses_json=json.dumps(RAG_STATUSES),
+        stats=stats, user=user, user_is_admin=user_is_admin, user_is_editor=user_is_editor)
 
 @app.route('/api/login', methods=['POST'])
 def login():
-    try:
-        data = request.json
-        alias = data.get('alias', '').strip().lower()
-        
-        if not alias:
-            return jsonify({'success': False, 'error': 'Please enter an alias'})
-        
-        if alias in [a.lower() for a in HARDCODED_ADMINS]:
-            session['user'] = alias
-            return jsonify({'success': True, 'role': 'admin'})
-        
-        editors = load_registered_editors()
-        if alias in [e.lower() for e in editors]:
-            session['user'] = alias
-            return jsonify({'success': True, 'role': 'editor'})
-        
-        return jsonify({'success': False, 'error': f'"{alias}" is not registered. Please sign up first.'})
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)})
+    data = request.json
+    alias = data.get('alias', '').strip().lower()
+    if not alias:
+        return jsonify({'success': False, 'error': 'Please enter an alias'})
+    if alias in [a.lower() for a in HARDCODED_ADMINS]:
+        session['user'] = alias
+        return jsonify({'success': True, 'role': 'admin'})
+    editors = load_registered_editors()
+    if alias in [e.lower() for e in editors]:
+        session['user'] = alias
+        return jsonify({'success': True, 'role': 'editor'})
+    return jsonify({'success': False, 'error': f'"{alias}" is not registered. Please sign up first.'})
 
 @app.route('/api/signup', methods=['POST'])
 def signup():
-    try:
-        data = request.json
-        alias = data.get('alias', '').strip().lower()
-        
-        if not alias:
-            return jsonify({'success': False, 'error': 'Please enter an alias'})
-        
-        if not alias.replace('-', '').replace('_', '').isalnum():
-            return jsonify({'success': False, 'error': 'Invalid alias format'})
-        
-        if alias in [a.lower() for a in HARDCODED_ADMINS]:
-            session['user'] = alias
-            return jsonify({'success': True, 'role': 'admin'})
-        
-        editors = load_registered_editors()
-        if alias in [e.lower() for e in editors]:
-            session['user'] = alias
-            return jsonify({'success': True, 'role': 'editor'})
-        
-        editors.append(alias)
-        if save_registered_editors(editors):
-            session['user'] = alias
-            return jsonify({'success': True, 'role': 'editor'})
-        else:
-            return jsonify({'success': False, 'error': 'Failed to save registration'})
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)})
+    data = request.json
+    alias = data.get('alias', '').strip().lower()
+    if not alias:
+        return jsonify({'success': False, 'error': 'Please enter an alias'})
+    if not alias.replace('-', '').replace('_', '').isalnum():
+        return jsonify({'success': False, 'error': 'Invalid alias format'})
+    if alias in [a.lower() for a in HARDCODED_ADMINS]:
+        session['user'] = alias
+        return jsonify({'success': True, 'role': 'admin'})
+    editors = load_registered_editors()
+    if alias in [e.lower() for e in editors]:
+        session['user'] = alias
+        return jsonify({'success': True, 'role': 'editor'})
+    editors.append(alias)
+    if save_registered_editors(editors):
+        session['user'] = alias
+        return jsonify({'success': True, 'role': 'editor'})
+    return jsonify({'success': False, 'error': 'Failed to save registration'})
 
 @app.route('/logout')
 def logout():
@@ -838,132 +637,84 @@ def logout():
 def export_excel(dataset):
     if dataset not in DATASETS:
         return "Not found", 404
-    
     df = load_from_s3(dataset)
     if isinstance(df, str):
         return f"Error: {df}", 500
-    
     output = BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         df.to_excel(writer, index=False, sheet_name=DATASETS[dataset][:31])
     output.seek(0)
-    
-    filename = f"MX_EFile_{dataset}_{datetime.now().strftime('%Y%m%d')}.xlsx"
     return Response(output.getvalue(),
         mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-        headers={'Content-Disposition': f'attachment; filename={filename}'})
+        headers={'Content-Disposition': f'attachment; filename=MX_EFile_{dataset}_{datetime.now().strftime("%Y%m%d")}.xlsx'})
 
 @app.route('/export/<dataset>/csv')
 def export_csv(dataset):
     if dataset not in DATASETS:
         return "Not found", 404
-    
     df = load_from_s3(dataset)
     if isinstance(df, str):
         return f"Error: {df}", 500
-    
     output = StringIO()
     df.to_csv(output, index=False)
-    
-    filename = f"MX_EFile_{dataset}_{datetime.now().strftime('%Y%m%d')}.csv"
     return Response(output.getvalue(), mimetype='text/csv',
-        headers={'Content-Disposition': f'attachment; filename={filename}'})
+        headers={'Content-Disposition': f'attachment; filename=MX_EFile_{dataset}_{datetime.now().strftime("%Y%m%d")}.csv'})
 
 @app.route('/api/inline-update', methods=['POST'])
 @login_required_editor
 def inline_update():
-    try:
-        data = request.json
-        dataset = data.get('dataset')
-        row_index = data.get('rowIndex')
-        column = data.get('column')
-        value = data.get('value', '')
-        
-        if dataset not in DATASETS:
-            return jsonify({'success': False, 'error': 'Invalid dataset'})
-        
-        df = load_from_s3(dataset)
-        if isinstance(df, str):
-            return jsonify({'success': False, 'error': df})
-        
-        if row_index < 0 or row_index >= len(df):
-            return jsonify({'success': False, 'error': 'Invalid row index'})
-        
-        if column not in df.columns:
-            return jsonify({'success': False, 'error': f'Column "{column}" not found'})
-        
-        df.at[row_index, column] = str(value) if value else ''
-        
-        result = save_to_s3(dataset, df)
-        if result is True:
-            return jsonify({'success': True})
-        return jsonify({'success': False, 'error': str(result)})
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)})
+    data = request.json
+    dataset, row_index, column, value = data.get('dataset'), data.get('rowIndex'), data.get('column'), data.get('value', '')
+    if dataset not in DATASETS:
+        return jsonify({'success': False, 'error': 'Invalid dataset'})
+    df = load_from_s3(dataset)
+    if isinstance(df, str):
+        return jsonify({'success': False, 'error': df})
+    if row_index < 0 or row_index >= len(df) or column not in df.columns:
+        return jsonify({'success': False, 'error': 'Invalid row or column'})
+    df.at[row_index, column] = str(value) if value else ''
+    result = save_to_s3(dataset, df)
+    return jsonify({'success': True}) if result is True else jsonify({'success': False, 'error': str(result)})
 
 @app.route('/api/update-generic', methods=['POST'])
 @login_required_editor
 def update_generic():
-    try:
-        data = request.json
-        dataset = data.get('dataset')
-        row_index = data.get('rowIndex', -1)
-        is_new = data.get('isNew', False)
-        fields = data.get('fields', {})
-        
-        if dataset not in DATASETS:
-            return jsonify({'success': False, 'error': 'Invalid dataset'})
-        
-        if is_new and not is_admin():
-            return jsonify({'success': False, 'error': 'Admin access required to add items'})
-        
-        df = load_from_s3(dataset)
-        if isinstance(df, str):
-            return jsonify({'success': False, 'error': df})
-        
-        if is_new:
-            new_row = {col: fields.get(col, '') for col in df.columns}
-            df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
-        else:
-            if row_index < 0 or row_index >= len(df):
-                return jsonify({'success': False, 'error': 'Invalid row index'})
-            for col in df.columns:
-                if col in fields:
-                    df.at[row_index, col] = str(fields[col]) if fields[col] else ''
-        
-        result = save_to_s3(dataset, df)
-        if result is True:
-            return jsonify({'success': True})
-        return jsonify({'success': False, 'error': str(result)})
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)})
+    data = request.json
+    dataset, row_index, is_new, fields = data.get('dataset'), data.get('rowIndex', -1), data.get('isNew', False), data.get('fields', {})
+    if dataset not in DATASETS:
+        return jsonify({'success': False, 'error': 'Invalid dataset'})
+    if is_new and not is_admin():
+        return jsonify({'success': False, 'error': 'Admin access required to add items'})
+    df = load_from_s3(dataset)
+    if isinstance(df, str):
+        return jsonify({'success': False, 'error': df})
+    if is_new:
+        new_row = {col: fields.get(col, '') for col in df.columns}
+        df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+    else:
+        if row_index < 0 or row_index >= len(df):
+            return jsonify({'success': False, 'error': 'Invalid row index'})
+        for col in df.columns:
+            if col in fields:
+                df.at[row_index, col] = str(fields[col]) if fields[col] else ''
+    result = save_to_s3(dataset, df)
+    return jsonify({'success': True}) if result is True else jsonify({'success': False, 'error': str(result)})
 
 @app.route('/api/delete', methods=['POST'])
 @login_required_admin
 def delete_item():
-    try:
-        data = request.json
-        dataset = data.get('dataset')
-        row_index = data.get('rowIndex')
-        
-        if dataset not in DATASETS:
-            return jsonify({'success': False, 'error': 'Invalid dataset'})
-        
-        df = load_from_s3(dataset)
-        if isinstance(df, str):
-            return jsonify({'success': False, 'error': df})
-        
-        if row_index < 0 or row_index >= len(df):
-            return jsonify({'success': False, 'error': 'Invalid row index'})
-        
-        df = df.drop(index=row_index).reset_index(drop=True)
-        
-        result = save_to_s3(dataset, df)
-        if result is True:
-            return jsonify({'success': True})
-        return jsonify({'success': False, 'error': str(result)})
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)})
+    data = request.json
+    dataset, row_index = data.get('dataset'), data.get('rowIndex')
+    if dataset not in DATASETS:
+        return jsonify({'success': False, 'error': 'Invalid dataset'})
+    df = load_from_s3(dataset)
+    if isinstance(df, str):
+        return jsonify({'success': False, 'error': df})
+    if row_index < 0 or row_index >= len(df):
+        return jsonify({'success': False, 'error': 'Invalid row index'})
+    df = df.drop(index=row_index).reset_index(drop=True)
+    result = save_to_s3(dataset, df)
+    return jsonify({'success': True}) if result is True else jsonify({'success': False, 'error': str(result)})
 
 @app.route('/health')
 def health():
