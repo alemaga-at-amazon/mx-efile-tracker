@@ -29,8 +29,9 @@ DATASETS = {
 TEAMS = ['GTS', 'AP/FinOps', 'Supply Chain', 'InTech', 'Legal', 'HR/Payroll', 'Accounting', 'Retail', 'GREF', 'Customs Broker']
 PHASES = ['Short-Term', 'Mid-Term', 'Long-Term', 'Ongoing']
 WORKSTREAMS = ['Document Discovery', 'System Integration', 'Process Design', 'Training & Change', 'Compliance & Audit', 'Vendor Management', 'Technology', 'Operations']
-STATUSES = ['Planned', 'In Progress', 'Active', 'Complete', 'On Hold']
+STATUSES = ['Planned', 'In Progress', 'Active', 'Complete', 'On Hold', 'Finished']
 RAG_STATUSES = ['Green', 'Amber', 'Red']
+PRIORITIES = ['P0', 'P1', 'P2']
 
 def get_s3_client():
     return boto3.client('s3', region_name=S3_REGION, config=Config(connect_timeout=5, read_timeout=10))
@@ -146,7 +147,8 @@ def render_page(dataset):
     if dataset == 'action-plan' and not error and 'Status' in columns:
         df = result
         stats = {'total': len(df), 'active': len(df[df['Status']=='Active']), 
-                 'progress': len(df[df['Status']=='In Progress']), 'planned': len(df[df['Status']=='Planned'])}
+                 'progress': len(df[df['Status']=='In Progress']), 'planned': len(df[df['Status']=='Planned']),
+                 'finished': len(df[df['Status']=='Finished'])}
     
     nav_html = ''
     for k, v in DATASETS.items():
@@ -159,7 +161,7 @@ def render_page(dataset):
             <div class="stat"><div class="stat-num">{stats['total']}</div><div>Total</div></div>
             <div class="stat"><div class="stat-num">{stats['active']}</div><div>Active</div></div>
             <div class="stat"><div class="stat-num">{stats['progress']}</div><div>In Progress</div></div>
-            <div class="stat"><div class="stat-num">{stats['planned']}</div><div>Planned</div></div>
+            <div class="stat"><div class="stat-num">{stats['finished']}</div><div>Finished</div></div>
         </div>'''
     
     if user:
@@ -217,14 +219,19 @@ def render_page(dataset):
             for c in columns:
                 val = str(row.get(c, '') or '')
                 
-                if dataset == 'action-plan' and c == 'ETA' and is_edt:
-                    table += f'<td><input type="date" class="inline" value="{parse_date(val)}" onchange="inlineUpd({i},\'ETA\',this.value)"></td>'
+                # Inline editing for Action Plan
+                if dataset == 'action-plan' and c == 'Deadline' and is_edt:
+                    table += f'<td><input type="text" class="inline" style="width:80px" value="{esc(val)}" onchange="inlineUpd({i},\'Deadline\',this.value)"></td>'
                 elif dataset == 'action-plan' and c == 'Status' and is_edt:
                     opts = make_options(STATUSES, val)
                     table += f'<td><select class="inline" onchange="inlineUpd({i},\'Status\',this.value)">{opts}</select></td>'
                 elif dataset == 'action-plan' and c == 'RAG Status' and is_edt:
                     opts = make_options(RAG_STATUSES, val)
                     table += f'<td><select class="inline" onchange="inlineUpd({i},\'RAG Status\',this.value)">{opts}</select></td>'
+                elif dataset == 'action-plan' and c == 'Priority' and is_edt:
+                    opts = make_options(PRIORITIES, val)
+                    table += f'<td><select class="inline" onchange="inlineUpd({i},\'Priority\',this.value)">{opts}</select></td>'
+                # Badge styling
                 elif c == 'Status':
                     cls = val.lower().replace(' ', '')
                     table += f'<td><span class="badge {cls}">{esc(val)}</span></td>'
@@ -232,8 +239,12 @@ def render_page(dataset):
                     table += f'<td><span class="badge rag-{val.lower()}">{esc(val)}</span></td>'
                 elif c == 'Priority':
                     table += f'<td><span class="badge {val.lower()}">{esc(val)}</span></td>'
-                elif c in ['Owner', 'Stakeholder', 'Alias', 'POC'] and val:
-                    table += f'<td><a href="https://phonetool.amazon.com/users/{esc(val)}" target="_blank" class="link">{esc(val)}</a></td>'
+                # Phonetool links for alias columns
+                elif c in ['Owner', 'Stakeholder', 'Alias', 'POC', 'Escalation'] and val:
+                    # Handle multiple aliases separated by comma
+                    aliases = [a.strip().replace('@', '') for a in val.split(',')]
+                    links = ', '.join([f'<a href="https://phonetool.amazon.com/users/{esc(a)}" target="_blank" class="link">{esc(a)}</a>' for a in aliases if a])
+                    table += f'<td>{links}</td>'
                 else:
                     table += f'<td>{esc(val)}</td>'
             table += '</tr>'
@@ -284,7 +295,7 @@ tr.filter-row td{padding:4px 3px;border-bottom:2px solid #003366}
 .badge.active,.badge.rag-green,.badge.p2{background:#90EE90}
 .badge.inprogress,.badge.rag-amber,.badge.p1{background:#FFD700}
 .badge.planned{background:#E0E0E0}
-.badge.complete{background:#4CAF50;color:#fff}
+.badge.complete,.badge.finished{background:#4CAF50;color:#fff}
 .badge.onhold{background:#999;color:#fff}
 .badge.rag-red,.badge.p0{background:#FF6B6B;color:#fff}
 .link{color:#0070c0;text-decoration:none}.link:hover{text-decoration:underline}
@@ -364,7 +375,7 @@ tr.filter-row td{padding:4px 3px;border-bottom:2px solid #003366}
 </div>
 
 <script>
-var DATA={rows:%%ROWS_JS%%,cols:%%COLS_JS%%,ds:"%%DATASET%%",teams:%%TEAMS_JS%%,phases:%%PHASES_JS%%,ws:%%WS_JS%%,st:%%ST_JS%%,rag:%%RAG_JS%%};
+var DATA={rows:%%ROWS_JS%%,cols:%%COLS_JS%%,ds:"%%DATASET%%",teams:%%TEAMS_JS%%,phases:%%PHASES_JS%%,ws:%%WS_JS%%,st:%%ST_JS%%,rag:%%RAG_JS%%,priorities:%%PRIORITIES_JS%%};
 var editIdx=-1,isNew=false;
 var colOffset=%%COL_OFFSET%%;
 
@@ -426,7 +437,6 @@ fetch('/api/signup',{method:'POST',headers:{'Content-Type':'application/json'},b
 }
 
 function inlineUpd(idx,col,val){
-if(col==='ETA'&&val){var p=val.split('-');if(p.length===3)val=p[1]+'/'+p[2]+'/'+p[0];}
 fetch('/api/inline-update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({dataset:DATA.ds,rowIndex:idx,column:col,value:val})})
 .then(function(r){return r.json();}).then(function(d){if(!d.success){alert(d.error||'Error');location.reload();}});
 }
@@ -451,15 +461,29 @@ document.getElementById('editModal').classList.add('show');
 
 function getFields(){
 if(DATA.ds==='action-plan')return[
-{n:'Action ID',t:'text',r:1},{n:'Phase',t:'sel',o:DATA.phases},{n:'Workstream',t:'sel',o:DATA.ws},
-{n:'Action Item',t:'area',r:1},{n:'Team',t:'sel',o:[''].concat(DATA.teams)},{n:'Owner',t:'text'},
-{n:'Dependencies',t:'text'},{n:'ETA',t:'date'},{n:'Status',t:'sel',o:DATA.st},
-{n:'Priority',t:'sel',o:['P0','P1','P2']},{n:'RAG Status',t:'sel',o:DATA.rag},
-{n:'Reason for R/A',t:'area'},{n:'Path to Green',t:'area'},{n:'Notes',t:'area'}];
+{n:'Action ID',t:'text',r:1},
+{n:'Phase',t:'sel',o:DATA.phases},
+{n:'Workstream',t:'sel',o:DATA.ws},
+{n:'Priority',t:'sel',o:DATA.priorities},
+{n:'Action Item',t:'area',r:1},
+{n:'Team',t:'sel',o:[''].concat(DATA.teams)},
+{n:'Owner',t:'text'},
+{n:'Escalation',t:'text'},
+{n:'Dependencies',t:'text'},
+{n:'Deadline',t:'text'},
+{n:'Status',t:'sel',o:DATA.st},
+{n:'Notes',t:'area'},
+{n:'RAG Status',t:'sel',o:DATA.rag},
+{n:'Reason for R/A/G',t:'area'},
+{n:'Path to Green',t:'area'}];
 if(DATA.ds==='stakeholder-matrix')return[
-{n:'Team',t:'sel',o:[''].concat(DATA.teams)},{n:'Stakeholder',t:'text'},{n:'Role',t:'text'},
-{n:'Involvement',t:'sel',o:['High','Medium','Low']},{n:'Communication',t:'sel',o:['Email','Chime','Meetings','Slack']},
-{n:'Responsibilities',t:'area'},{n:'Notes',t:'area'}];
+{n:'Team',t:'sel',o:[''].concat(DATA.teams)},
+{n:'Stakeholder',t:'text'},
+{n:'Role',t:'text'},
+{n:'Involvement',t:'sel',o:['High','Medium','Low']},
+{n:'Communication',t:'sel',o:['Email','Chime','Meetings','Slack']},
+{n:'Responsibilities',t:'area'},
+{n:'Notes',t:'area'}];
 return DATA.cols.map(function(c){return {n:c,t:'text'};});
 }
 
@@ -497,7 +521,6 @@ e.preventDefault();
 var fields=getFields(),data={dataset:DATA.ds,rowIndex:editIdx,isNew:isNew,fields:{}};
 fields.forEach(function(f,i){
 var el=document.getElementById('f'+i),v=el?el.value:'';
-if(f.t==='date'&&v){var p=v.split('-');if(p.length===3)v=p[1]+'/'+p[2]+'/'+p[0];}
 data.fields[f.n]=v;
 });
 fetch('/api/update-generic',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)})
@@ -532,6 +555,7 @@ document.querySelectorAll('.modal').forEach(function(m){m.addEventListener('clic
     html = html.replace('%%WS_JS%%', json.dumps(WORKSTREAMS))
     html = html.replace('%%ST_JS%%', json.dumps(STATUSES))
     html = html.replace('%%RAG_JS%%', json.dumps(RAG_STATUSES))
+    html = html.replace('%%PRIORITIES_JS%%', json.dumps(PRIORITIES))
     html = html.replace('%%COL_OFFSET%%', col_offset_js)
     
     return html
@@ -620,24 +644,4 @@ def update_generic():
     else:
         for c in df.columns:
             if c in data['fields']:
-                df.at[data['rowIndex'], c] = data['fields'][c]
-    result = save_to_s3(data['dataset'], df)
-    return jsonify({'success': result is True, 'error': None if result is True else str(result)})
-
-@app.route('/api/delete', methods=['POST'])
-@login_required_admin
-def delete_item():
-    data = request.json
-    df = load_from_s3(data['dataset'])
-    if isinstance(df, str):
-        return jsonify({'success': False, 'error': df})
-    df = df.drop(index=data['rowIndex']).reset_index(drop=True)
-    result = save_to_s3(data['dataset'], df)
-    return jsonify({'success': result is True, 'error': None if result is True else str(result)})
-
-@app.route('/health')
-def health():
-    return jsonify({"status": "ok"})
-
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=8080)
+                df.at[data['rowInd
