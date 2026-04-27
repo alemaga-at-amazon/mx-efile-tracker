@@ -16,14 +16,15 @@ S3_BUCKET = os.environ.get('S3_BUCKET', 'gts-latam-efile-tracker')
 S3_REGION = os.environ.get('AWS_DEFAULT_REGION', 'us-east-1')
 
 HARDCODED_ADMINS = ['alemaga', 'soemilio', 'gregonz']
-
 DATASETS = {
     'action-plan': 'Action Plan',
+    'scenarios': 'Scenarios',
     'business-requirements': 'Business Requirements',
     'doc-checklist': 'Doc Checklist',
     'stakeholder-matrix': 'Stakeholder Matrix',
     'risk-penalties': 'Risk and Penalties',
     'operational-volume': 'Operational Volume'
+}
 }
 
 TEAMS = ['GTS', 'AP/FinOps', 'Supply Chain', 'InTech', 'Legal', 'HR/Payroll', 'Accounting', 'Retail', 'GREF', 'Customs Broker']
