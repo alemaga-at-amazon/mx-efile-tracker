@@ -154,7 +154,6 @@ def render_page(dataset):
     for k, v in DATASETS.items():
         active = 'active' if k == dataset else ''
         nav_html += f'<a href="/{k}" class="{active}">{v}</a>'
-    
     stats_html = ''
     if stats:
         stats_html = f'''<div class="stats">
@@ -166,13 +165,12 @@ def render_page(dataset):
     
     if user:
         role = '<span class="role admin">Admin</span>' if is_adm else '<span class="role editor">Editor</span>' if is_edt else ''
-        user_html = f'<span class="user-info">👤 {esc(user)} {role}</span> <a href="/logout" class="btn">Logout</a>'
+        sync_link = ' <a href="/admin/sync" class="btn" style="background:#28a745">📤 Sync</a>' if is_adm else ''
+        user_html = f'<span class="user-info">👤 {esc(user)} {role}</span>{sync_link} <a href="/logout" class="btn">Logout</a>'
     else:
         user_html = '<button class="btn" onclick="showLogin()">Login</button>'
     
     btns = f'<a href="/export/{dataset}/csv" class="btn gray">📥 Export</a>'
-    if is_adm:
-        btns += ' <button class="btn green" onclick="showAdd()">+ Add New</button>'
     
     notice = ''
     if not user:
@@ -662,6 +660,275 @@ def delete_item():
 @app.route('/health')
 def health():
     return jsonify({"status": "ok"})
+
+# ============================================
+# ADMIN SYNC FEATURE
+# ============================================
+
+SHEET_MAP = {
+    'Action Plan': 'action-plan',
+    'Scenarios': 'scenarios',
+    'Business Requirements': 'business-requirements',
+    'Doc Checklist': 'doc-checklist',
+    'Stakeholder Matrix': 'stakeholder-matrix',
+    'Risk and Penalties': 'risk-penalties',
+    'Operational Volume': 'operational-volume'
+}
+
+def get_last_sync():
+    try:
+        s3 = get_s3_client()
+        response = s3.get_object(Bucket=S3_BUCKET, Key='config/last_sync.json')
+        return json.loads(response['Body'].read().decode('utf-8'))
+    except:
+        return None
+
+def save_last_sync(user, results):
+    try:
+        s3 = get_s3_client()
+        data = {
+            'user': user,
+            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'results': results
+        }
+        s3.put_object(Bucket=S3_BUCKET, Key='config/last_sync.json',
+                      Body=json.dumps(data), ContentType='application/json')
+    except:
+        pass
+
+@app.route('/admin/sync')
+def admin_sync_page():
+    if not is_admin():
+        return redirect('/')
+    
+    user = session.get('user', '')
+    last_sync = get_last_sync()
+    
+    last_sync_html = ''
+    if last_sync:
+        last_sync_html = f'''
+        <div class="last-sync">
+            <h3>Last Sync</h3>
+            <p><strong>By:</strong> {esc(last_sync.get('user', 'Unknown'))}</p>
+            <p><strong>Date:</strong> {esc(last_sync.get('timestamp', 'Unknown'))}</p>
+            <div class="results">
+                {'<br>'.join([esc(r) for r in last_sync.get('results', [])])}
+            </div>
+        </div>
+        '''
+    
+    html = '''<!DOCTYPE html>
+<html>
+<head>
+<title>Sync Data - MX E-File Tracker</title>
+<style>
+* { box-sizing: border-box; }
+body { font-family: -apple-system, sans-serif; margin: 0; padding: 20px; background: #f5f5f5; }
+.header { background: #003366; color: #fff; padding: 20px; margin: -20px -20px 20px; display: flex; justify-content: space-between; align-items: center; }
+.header h1 { margin: 0; font-size: 22px; }
+.header a { color: #fff; text-decoration: none; padding: 8px 14px; background: rgba(255,255,255,0.2); border-radius: 5px; }
+.header a:hover { background: rgba(255,255,255,0.3); }
+.card { background: #fff; padding: 30px; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); max-width: 600px; margin: 0 auto; }
+.card h2 { margin-top: 0; color: #003366; }
+.upload-zone { border: 3px dashed #ccc; border-radius: 12px; padding: 60px 30px; text-align: center; cursor: pointer; transition: all 0.3s; margin: 20px 0; }
+.upload-zone:hover, .upload-zone.dragover { border-color: #0070c0; background: #f0f7ff; }
+.upload-zone .icon { font-size: 48px; margin-bottom: 15px; }
+.upload-zone p { margin: 0; color: #666; font-size: 16px; }
+.upload-zone input { display: none; }
+.btn { background: #0070c0; color: #fff; border: none; padding: 14px 28px; border-radius: 8px; cursor: pointer; font-size: 16px; width: 100%; margin-top: 15px; }
+.btn:hover { background: #005a9e; }
+.btn:disabled { background: #ccc; cursor: not-allowed; }
+.selected-file { background: #d4edda; padding: 12px 15px; border-radius: 8px; margin: 15px 0; display: none; }
+.selected-file .name { font-weight: 600; color: #155724; }
+.results-box { background: #f8f9fa; padding: 20px; border-radius: 8px; margin-top: 20px; display: none; }
+.results-box h3 { margin-top: 0; color: #003366; }
+.results-box .item { padding: 8px 0; border-bottom: 1px solid #eee; }
+.results-box .item.success { color: #28a745; }
+.results-box .item.error { color: #dc3545; }
+.last-sync { background: #e8f4fd; padding: 20px; border-radius: 8px; margin-top: 25px; }
+.last-sync h3 { margin-top: 0; color: #003366; }
+.last-sync p { margin: 5px 0; }
+.last-sync .results { margin-top: 10px; font-size: 13px; color: #666; }
+.spinner { display: none; }
+.spinner.show { display: inline-block; animation: spin 1s linear infinite; margin-right: 8px; }
+@keyframes spin { 100% { transform: rotate(360deg); } }
+.info { background: #fff3cd; padding: 15px; border-radius: 8px; margin-bottom: 20px; font-size: 14px; }
+.info a { color: #0070c0; }
+</style>
+</head>
+<body>
+<div class="header">
+    <h1>📤 Sync Data from Excel</h1>
+    <a href="/">← Back to Tracker</a>
+</div>
+
+<div class="card">
+    <h2>Upload Excel File</h2>
+    
+    <div class="info">
+        📋 <strong>Step 1:</strong> Download the latest Excel from 
+        <a href="https://amazon.sharepoint.com/:x:/r/sites/GTSMX/_layouts/15/Doc.aspx?sourcedoc=%7BCDBC38EA-2CE1-4974-A76F-26A772A315CF%7D&file=MX_EFile_Tracker.xlsx" target="_blank">SharePoint</a><br>
+        📤 <strong>Step 2:</strong> Upload it here to sync all sheets to the database
+    </div>
+    
+    <div class="upload-zone" id="uploadZone" onclick="document.getElementById('fileInput').click()">
+        <div class="icon">📁</div>
+        <p>Drop Excel file here or click to browse</p>
+        <input type="file" id="fileInput" accept=".xlsx,.xls">
+    </div>
+    
+    <div class="selected-file" id="selectedFile">
+        📄 <span class="name" id="fileName"></span>
+    </div>
+    
+    <button class="btn" id="syncBtn" onclick="doSync()" disabled>
+        <span class="spinner" id="spinner">⏳</span>
+        Sync to Database
+    </button>
+    
+    <div class="results-box" id="resultsBox">
+        <h3>✅ Sync Results</h3>
+        <div id="resultsContent"></div>
+    </div>
+    
+    ''' + last_sync_html + '''
+</div>
+
+<script>
+var selectedFile = null;
+
+document.getElementById('fileInput').addEventListener('change', function(e) {
+    if (e.target.files.length > 0) {
+        selectedFile = e.target.files[0];
+        document.getElementById('fileName').textContent = selectedFile.name;
+        document.getElementById('selectedFile').style.display = 'block';
+        document.getElementById('syncBtn').disabled = false;
+    }
+});
+
+var zone = document.getElementById('uploadZone');
+zone.addEventListener('dragover', function(e) {
+    e.preventDefault();
+    zone.classList.add('dragover');
+});
+zone.addEventListener('dragleave', function(e) {
+    zone.classList.remove('dragover');
+});
+zone.addEventListener('drop', function(e) {
+    e.preventDefault();
+    zone.classList.remove('dragover');
+    if (e.dataTransfer.files.length > 0) {
+        var file = e.dataTransfer.files[0];
+        if (file.name.endsWith('.xlsx') || file.name.endsWith('.xls')) {
+            selectedFile = file;
+            document.getElementById('fileInput').files = e.dataTransfer.files;
+            document.getElementById('fileName').textContent = selectedFile.name;
+            document.getElementById('selectedFile').style.display = 'block';
+            document.getElementById('syncBtn').disabled = false;
+        } else {
+            alert('Please select an Excel file (.xlsx or .xls)');
+        }
+    }
+});
+
+function doSync() {
+    if (!selectedFile) return;
+    
+    var btn = document.getElementById('syncBtn');
+    var spinner = document.getElementById('spinner');
+    btn.disabled = true;
+    spinner.classList.add('show');
+    btn.innerHTML = '<span class="spinner show">⏳</span> Syncing...';
+    
+    var formData = new FormData();
+    formData.append('file', selectedFile);
+    
+    fetch('/api/sync-upload', {
+        method: 'POST',
+        body: formData
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+        btn.disabled = false;
+        btn.innerHTML = 'Sync to Database';
+        
+        var resultsBox = document.getElementById('resultsBox');
+        var content = document.getElementById('resultsContent');
+        
+        if (d.success) {
+            var html = '';
+            d.results.forEach(function(r) {
+                var cls = r.startsWith('✓') ? 'success' : 'error';
+                html += '<div class="item ' + cls + '">' + r + '</div>';
+            });
+            content.innerHTML = html;
+            resultsBox.style.display = 'block';
+        } else {
+            content.innerHTML = '<div class="item error">Error: ' + (d.error || 'Unknown error') + '</div>';
+            resultsBox.style.display = 'block';
+        }
+    })
+    .catch(function(err) {
+        btn.disabled = false;
+        btn.innerHTML = 'Sync to Database';
+        alert('Error: ' + err.message);
+    });
+}
+</script>
+</body>
+</html>'''
+    
+    return html
+
+@app.route('/api/sync-upload', methods=['POST'])
+def api_sync_upload():
+    if not is_admin():
+        return jsonify({'success': False, 'error': 'Admin required'})
+    
+    if 'file' not in request.files:
+        return jsonify({'success': False, 'error': 'No file uploaded'})
+    
+    file = request.files['file']
+    if not file.filename:
+        return jsonify({'success': False, 'error': 'No file selected'})
+    
+    try:
+        # Read Excel file
+        excel_data = BytesIO(file.read())
+        results = []
+        
+        for sheet_name, folder in SHEET_MAP.items():
+            try:
+                df = pd.read_excel(excel_data, sheet_name=sheet_name)
+                df = df.fillna('')
+                
+                # Convert all columns to string to avoid type issues
+                for col in df.columns:
+                    df[col] = df[col].astype(str).replace('nan', '')
+                
+                # Upload to S3
+                csv_buffer = StringIO()
+                df.to_csv(csv_buffer, index=False)
+                
+                s3 = get_s3_client()
+                s3.put_object(
+                    Bucket=S3_BUCKET,
+                    Key=f"{folder}/data.csv",
+                    Body=csv_buffer.getvalue(),
+                    ContentType='text/csv'
+                )
+                
+                results.append(f"✓ {sheet_name}: {len(df)} rows, {len(df.columns)} columns")
+            except Exception as e:
+                results.append(f"✗ {sheet_name}: {str(e)}")
+        
+        # Save sync info
+        save_last_sync(session.get('user', 'Unknown'), results)
+        
+        return jsonify({'success': True, 'results': results})
+        
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8080)
