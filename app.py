@@ -644,4 +644,24 @@ def update_generic():
     else:
         for c in df.columns:
             if c in data['fields']:
-                df.at[data['rowInd
+                df.at[data['rowIndex'], c] = data['fields'][c]
+    result = save_to_s3(data['dataset'], df)
+    return jsonify({'success': result is True, 'error': None if result is True else str(result)})
+
+@app.route('/api/delete', methods=['POST'])
+@login_required_admin
+def delete_item():
+    data = request.json
+    df = load_from_s3(data['dataset'])
+    if isinstance(df, str):
+        return jsonify({'success': False, 'error': df})
+    df = df.drop(index=data['rowIndex']).reset_index(drop=True)
+    result = save_to_s3(data['dataset'], df)
+    return jsonify({'success': result is True, 'error': None if result is True else str(result)})
+
+@app.route('/health')
+def health():
+    return jsonify({"status": "ok"})
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=8080)
