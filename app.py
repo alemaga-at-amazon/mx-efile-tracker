@@ -16,6 +16,7 @@ S3_BUCKET = os.environ.get('S3_BUCKET', 'gts-latam-efile-tracker')
 S3_REGION = os.environ.get('AWS_DEFAULT_REGION', 'us-east-1')
 
 HARDCODED_ADMINS = ['alemaga', 'soemilio', 'gregonz']
+
 DATASETS = {
     'action-plan': 'Action Plan',
     'scenarios': 'Scenarios',
@@ -25,8 +26,6 @@ DATASETS = {
     'risk-penalties': 'Risk and Penalties',
     'operational-volume': 'Operational Volume'
 }
-}
-
 TEAMS = ['GTS', 'AP/FinOps', 'Supply Chain', 'InTech', 'Legal', 'HR/Payroll', 'Accounting', 'Retail', 'GREF', 'Customs Broker']
 PHASES = ['Short-Term', 'Mid-Term', 'Long-Term', 'Ongoing']
 WORKSTREAMS = ['Document Discovery', 'System Integration', 'Process Design', 'Training & Change', 'Compliance & Audit', 'Vendor Management', 'Technology', 'Operations']
